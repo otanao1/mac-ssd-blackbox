@@ -33,11 +33,25 @@ L1 minute-by-minute data and L2 daily data are retained without aggregation for 
 
 ### Incident evidence
 
-A sharp drop in free space or a low-space threshold can create an **Incident** with timestamps, triggering measurements, historical context, and available diagnostics. Incidents retain evaluated findings for up to three years, with references to related scan IDs and optional excerpts of raw evidence where useful. They do not ordinarily duplicate full raw scan histories. Detection does not guarantee root-cause identification. 
+A sharp drop in free space or a low-space threshold can create an **Incident** with timestamps, triggering measurements, historical context, and available diagnostics. Incidents retain evaluated findings for up to three years, with references to related scan IDs and optional excerpts of raw evidence where useful. They do not ordinarily duplicate full raw scan histories. Detection does not guarantee root-cause identification.
 
 ### Investigation-friendly output
 
-The initial interface will be a CLI with machine-readable local data/export suitable for diagnostic tools and developer agents.
+The initial interface is a CLI. The MVP supports monitoring start/stop/reload/status, manual scan execution and cancellation, scan history for L1/L2/L3/L9, Incident list/detail views, and machine-readable output such as JSON. A dedicated export command is not required for the MVP.
+
+### Configuration and daemon
+
+Common settings are version-controlled, while local overrides and machine-specific settings remain outside Git. L2/L3 targets use `conf.d`-style configuration and a shared path notation. L9 targets are generated dynamically during Incident handling and stored in the local data area rather than as permanent configuration.
+
+A lightweight daemon is managed by `launchd`. It performs L1 observations and coordinates scheduling, Incident handling, scan exclusion, L9 waiting state, and child-process supervision. L2/L3/L9 scans run as separate processes so scan work and memory are released when each scan finishes.
+
+### Installation
+
+For the MVP, users obtain the project from GitHub and run a setup script. The clone working directory is not used directly as the installed runtime. Setup installs the runtime, CLI, configuration, data locations, and `launchd` registration into their intended locations.
+
+Initial setup must ask for the storage destination before monitoring starts and validate that it exists and is writable. For external SSD or NAS destinations, the setup must verify that the intended mount is present.
+
+Uninstallation must be supported, or at minimum documented with explicit manual removal steps. Runtime removal, configuration removal, and monitoring-data removal are treated separately; removing the runtime does not imply deleting collected data.
 
 ## Scope and safety
 
@@ -50,8 +64,10 @@ The MVP will **not** delete files automatically, terminate processes, perform au
 ## Roadmap
 
 - [Issue #1 — Define MVP scope and acceptance criteria](https://github.com/otanao1/mac-ssd-blackbox/issues/1)
-- Design collection, anomaly detection, Incident lifecycle, and retention
-- Implement and validate a minimal CLI-based monitor
+- [Issue #6 — Implement core monitoring and scan execution](https://github.com/otanao1/mac-ssd-blackbox/issues/6)
+- [Issue #7 — Implement storage, retention, and Incident lifecycle](https://github.com/otanao1/mac-ssd-blackbox/issues/7)
+- [Issue #8 — Implement CLI, configuration, daemon, and installation](https://github.com/otanao1/mac-ssd-blackbox/issues/8)
+- Validate MVP behavior and resource usage on a real Mac
 - Document installation, configuration, and removal before a public release
 
 Contributions and suggestions are welcome as the design evolves.
