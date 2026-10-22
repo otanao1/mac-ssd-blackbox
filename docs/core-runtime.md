@@ -1,0 +1,143 @@
+# #6 監視・スキャン実行基盤
+
+L1観測、L2/L3の定期実行、動的L9要求と子プロセス監視を実装する。
+仕様の正本は[監視設計](monitoring-design.md)とIssue #1・#2・#3。
+Incidentの自動検知・調査シーケンス・保持期限は#7、正式CLI・インストール・launchd登録は#8で扱う。
+
+## 実行環境
+
+- macOS、Python 3.11以上、標準ライブラリのみ。追加パッケージ不要。
+- 開発確認は既存のPython 3.11.8から作成したプロジェクト専用venvで実施。
+- Python 3.10を新たな対応対象に加える必要はなく、利用可能な3.11を最低対応版とした。
+- pyenv/Homebrew/システムPython/グローバルパッケージ/PATH/シェル設定を変更しない。
+- `diskutil`、`df`、`sysctl`はmacOS付属の読み取りコマンド。sudo不要。
+
+既存の対応Pythonを明示指定して、リポジトリ直下でvenvを作成する。
+
+```sh
+/path/to/existing/python3.11 -m venv .venv
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+## 開発用ターミナル操作
+
+以下は#6の検証用ハーネス。インストール先や正式コマンド体系はまだ定めない。
+データディレクトリは事前に作成し、初回だけ明示的に初期化する。以下の値は各ターミナルで同じものを指定する。
+
+```sh
+mkdir -m 700 /private/tmp/blackbox-demo-data
+.venv/bin/python -m blackbox --data /private/tmp/blackbox-demo-data init
+.venv/bin/python -m blackbox --data /private/tmp/blackbox-demo-data run
+```
+
+`run`だけではL1を毎分取得し、L2/L3の初期広域設定は読み込まない。
+別ターミナルから、小さな検証用ディレクトリを明示して要求する。
+
+```sh
+.venv/bin/python -m blackbox --data /private/tmp/blackbox-demo-data scan L3 '/path/to/small-fixture/*'
+.venv/bin/python -m blackbox --data /private/tmp/blackbox-demo-data status
+.venv/bin/python -m blackbox --data /private/tmp/blackbox-demo-data cancel SCAN_ID
+.venv/bin/python -m blackbox --data /private/tmp/blackbox-demo-data history --limit 20
+.venv/bin/python -m blackbox --data /private/tmp/blackbox-demo-data results SCAN_ID
+.venv/bin/python -m blackbox --data /private/tmp/blackbox-demo-data scan L9 '/path/to/small-fixture/*' --threshold 1048576 --max-depth 7
+.venv/bin/python -m blackbox --data /private/tmp/blackbox-demo-data clear-waiting
+```
+
+出力はJSON。履歴中の`targets`・`options`・`metrics`はSQLiteに保存したJSON文字列。
+`cancel`は指定したpending/runningスキャンの中止要求、`clear-waiting`は未実行のL9待機リスト全体の取り消し。
+監視本体の通常終了は実行ターミナルのCtrl-CまたはSIGTERM。所有する子を中止・回収して終了する。
+本体を止めても未実行の要求は残り、再起動後に実行する。
+
+### 周期・対象の明示設定
+
+Git管理外のローカルJSONを`run --config /path/to/local.json`で読み込める。
+起動時に1回読み込む。reloadは#8の対象。未指定の周期はL1=60秒、L2=86400秒、L3=3600秒。
+
+```json
+{
+  "intervals": {"L1": 60, "L2": 86400, "L3": 3600},
+  "l1_path": "/System/Volumes/Data",
+  "targets": {"L2": [], "L3": ["/path/to/small-fixture/*"]}
+}
+```
+
+`conf_dirs`でL2/L3ごとのディレクトリも指定可能。各`*.conf`の空行・`#`コメントを除く行を対象に追加する。
+同梱の`config/l2/conf.d/`（19指定）・`config/l3/conf.d/`（15指定）は設計済みの汎用初期対象。
+**広域設定を有効化するとホームやLibrary等を再帰走査する。小規模検証では読み込まない。**
+
+## 容量取得とマウント境界
+
+- Pythonの`stat`/`scandir`でメタデータのみ取得し、ファイル内容は開かない。
+- 主な容量は`st_blocks * 512`の割当容量。参考として論理バイト数も保存する。
+- ディレクトリ自身のメタデータ容量も合計に含む。ハードリンクは同一実行内で一度だけ加算する。
+- `~`を展開し、設定ルートは実パスへ正規化する。走査中のシンボリックリンクは追跡しない。
+- 親子指定は1回の走査結果を共有。`/*`はglob展開せず、親合計と隠し項目を含む直下内訳を意味する。
+- ルートごとに`df`からデバイスを取得し、`diskutil`の`Internal=true`を必須とする。明示指定した外部SSD/NASも拒否する。
+- 配下のマウント点・異なる`st_dev`には降りない。明示された別の内部ボリュームは独立した走査ルートとして検証する（VMもこの扱い）。
+- ディレクトリは`O_NOFOLLOW`と親fdを使って開き、取得済みのdevice/inodeと照合する。走査中の置換やエラーは記録する。
+- `diskutil`を使用できない場合は走査を拒否する。収集できないパスを成功扱いしない。
+- APFSの共有ブロック・clone・snapshot・圧縮等を厳密に配賦するものではない。L1とディレクトリ合計の一致は保証しない。
+- 走査は同時点のスナップショットではない。走査中に変化するファイル、権限不足、深すぎる階層等は部分結果になり得る。
+
+L9でもプレーンなパスは合計のみ。`/*`を指定すると同じ集計結果から直下を記録し、閾値の50%以上のディレクトリを最大7階層まで詳細出力する。
+個別ファイルは閾値の5%以上、未満は親ごとの件数・平均割当容量を保存する。
+容量合計の算出には配下全体のメタデータ走査が必要であり、7階層は詳細出力の上限。
+どの対象を深掘りするかというIncident側の判断・過去履歴比較は#7に接続する。
+
+## 排他・待機・復旧
+
+- `monitor.lock`で監視本体を1つに制限する。`scan.lock`を子へ継承し、L2/L3/L9は同時に1本。
+- 監視本体が異常終了しても生存する子がロックを保持する。再起動した本体はその終了を待つ。
+- 定期L2/L3は実行中・未処理要求・L9待機と競合するとskipped履歴を残す。待機キューへ積まない。
+- 同時に定期L2/L3が期限を迎える場合はL2が先、L3はスキップ。次回期限はその時点から各周期後。
+- 期限を永続化し、停止中の取り逃しを連続再実行しない。初回起動は即時、以後は設定秒間隔で実行する。
+- 手動L2/L3要求はpendingとして順番に処理する。L9待機対象がある場合はL9を先に実行する。
+- L9はパスと取得内容（閾値・最大深度）の組で重複排除。実行開始時に待機対象をトランザクションで実行履歴へ移す。
+- 実行リストは変更せず、新しい要求は次回用待機へ追加。同じパス・内容のrunning/succeeded/partialは開始後30分間再取得を抑止する。
+- APIの`request(..., cooldown=...)`で抑止時間を変更可能。失敗・中止は再取得を妨げない。
+- 中止要求は通常約0.2秒間隔で確認。応答しない所有子へ5秒後SIGTERM、10秒後SIGKILLを送る。
+- 子が結果を確定せず終了した場合はfailed（中止要求済みはcancelled）。再起動後はロック解放を確認して残存runningを確定する。
+- 旧本体の生存子についてはDBの中止要求で停止できるが、新本体はそのPIDへ強制シグナルを送らない。
+
+## 保存・状態と後続Issueの接続点
+
+既存の保存ディレクトリに`blackbox.sqlite3`を作成する。DBはmode 0600、保存ディレクトリは0700を推奨。
+設定・データはGit管理外。自動削除・容量上限・Incident表は今回導入しない。
+
+| 物理構造 | 用途 |
+| --- | --- |
+| `scans` | scan ID、層、契機、対象JSON、取得オプション、状態、時刻、PID、進捗、中止要求、エラー、負荷測定 |
+| `results` | scan ID・パス・種別ごとの容量、論理容量、成功/失敗、少量ファイルの統計 |
+| `l1` | 観測時刻、総量・使用量・空き量・一般ユーザーの利用可能量、起動ID、エラー |
+| `waiting` | L9の動的な待機パス・取得オプション・要求時刻 |
+| `meta` | 次回定期実行期限 |
+
+走査結果は設計の2論理構造（履歴・測定結果）で表現し、永続的な「スキャン対象」専用構造は設けない。
+子のSQLite TEMP表に走査結果を一時集計し、終了時に破棄する。大量の全履歴を監視本体のメモリへ読み込まない。
+対象パス失敗も測定結果へ保存する。最終状態はsucceeded/partial/failed/cancelled/skipped。
+走査中はcurrentに現在対象、completed/totalに指定対象の結果確定数を保存する。
+ディレクトリ内の総項目数は事前走査せず、進捗率は算出しない。中止・失敗時の結果は取得済み部分のみ。
+
+保存先のdevice/inode変更・書き込み失敗は通知して記録を停止し、同じ保存先が復旧すれば再試行する。
+通常の再オープンはSQLiteの`mode=rw`を使い、マウント消失時に新しいDBを自動作成しない。
+意図した外部保存先の初回検証・永続的なマウント識別・復旧運用の整備は#8の保存先設定で扱う。
+初回`init`は利用者が意図したマウントを確認してから行う。
+
+接続点は`runtime.Monitor.tick()/close()`、`runtime.request()`、`runtime.observe()`、`store.Store`。
+#7ではscan IDをIncidentから参照し、履歴比較・保持処理を追加できる。
+#8ではこれらのAPIへ正式CLI・設定・launchdの操作を接続できる。
+
+## 検証
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+/usr/bin/time -l .venv/bin/python -m tools.benchmark
+```
+
+自動テストは共通走査、隠し項目、親子指定、ハードリンク、L9閾値と深度、欠損・権限エラー、シンボリックリンク、マウント境界、明示内部マウント、排他・定期スキップ、L1独立、L9重複排除・待機分離・再取得抑止、実子プロセスの起動・中止・異常終了、ロック継承、保存先消失、JSON操作を確認する。
+
+実機ベンチマークは一時ディレクトリに20ディレクトリ・2,000ファイル（内容合計819,200バイト、空ファイルを含む）を作成して、L1とL2/L3/L9を確認する。既存の監視データや広域設定は利用しない。終了時に生成したfixtureだけを削除する。
+CPU時間/経過時間からCPU使用率（1コア100%基準）、`getrusage`で最大RSS、macOS `proc_pid_rusage`でプロセス別ディスク読み書きバイト数を計測する。
+後者を利用できない場合はnullとする。カーネルのプロセス帰属値であり、デバイス全体の物理転送量ではない。
+測定には一時集計・結果保存のI/Oを含み、外部ヘルパーのCPUと最終メトリクス保存直後の遅延書き込みを含まない。
+小規模でキャッシュの効いた測定のため、広域走査の性能を保証しない。

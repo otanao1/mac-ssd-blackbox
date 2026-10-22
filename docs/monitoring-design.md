@@ -1,6 +1,6 @@
 # 監視設計（MVP初期案）
 
-詳細・更新の正本は [Issue #2](https://github.com/otanao1/mac-ssd-blackbox/issues/2)。MVPスコープは [#1](https://github.com/otanao1/mac-ssd-blackbox/issues/1)、保持・Incidentのライフサイクルは [#3](https://github.com/otanao1/mac-ssd-blackbox/issues/3)。本書は設計案であり、実装済み機能ではない。
+詳細・更新の正本は [Issue #2](https://github.com/otanao1/mac-ssd-blackbox/issues/2)。MVPスコープは [#1](https://github.com/otanao1/mac-ssd-blackbox/issues/1)、保持・Incidentのライフサイクルは [#3](https://github.com/otanao1/mac-ssd-blackbox/issues/3)。本書は設計の正本を要約する。#6の実装範囲・起動方法・制約は[監視実行基盤](core-runtime.md)を参照。
 
 ## レイヤー
 
@@ -15,7 +15,7 @@
 
 ## Scanと設定
 
-L2・L3・L9は共通Scan処理を使う。同じスキャン実行内に親子パスがあれば再帰走査をまとめ、結果を再利用する。異なるレイヤー・実行時刻の走査は独立とする。原則sudo不要。外部SSD・NASなどを意図せず横断しない。VMボリュームは明示的な設定のみで走査する。実装言語・コマンドは未決定（Pythonは候補、duに限定しない）。
+L2・L3・L9は共通Scan処理を使う。同じスキャン実行内に親子パスがあれば再帰走査をまとめ、結果を再利用する。異なるレイヤー・実行時刻の走査は独立とする。原則sudo不要。外部SSD・NASなどを意図せず横断しない。VMボリュームは明示的な設定のみで走査する。#6ではPython標準ライブラリによるメタデータ走査を採用した。取得容量・安全条件の詳細は[監視実行基盤](core-runtime.md)を参照。
 
 - `config/l2/conf.d/`：L2（日次・Common）の設定
 - `config/l3/conf.d/`：L3（毎時・重点）の設定
@@ -166,4 +166,4 @@ MVPのCLIでは次を扱う。
 - #7: storage, retention, and Incident lifecycle
 - #8: CLI, configuration, daemon, and installation
 
-> この節を含む本書は設計方針であり、実装済み機能を意味しない。
+> 本書には#7・#8を含むMVP全体の設計方針を記す。実装済み範囲は[監視実行基盤](core-runtime.md)を参照。

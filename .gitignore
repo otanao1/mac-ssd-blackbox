@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Private monitoring state and machine-specific overrides
+local/
+data/
+*.sqlite3*
+config/local*.json
