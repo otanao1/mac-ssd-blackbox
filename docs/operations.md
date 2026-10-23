@@ -187,3 +187,31 @@ uninstallではbootout後にsocketが一時的に応答する競合によりエ�
 修正後の実環境でのuninstall再実行は別途承認後とし、まだ完了済みとは扱わない。
 ログイン／Mac再起動、実外部SSD/NASの切断・再マウント、広域実データ走査・長時間運転は未実施。
 launchdの基本構成は[Appleの説明](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)に沿う。
+
+## 運用診断ログ（Issue #8）
+
+異常・スキャン中断・記録復旧の状態変化だけを、`/usr/bin/log emit`経由でUnified Loggingへ送る。
+subsystemは`io.github.otanao1.mac-ssd-blackbox`、categoryは`runtime`。
+`log emit`は主にテスト・デバッグ用の標準コマンドであり、本方式はその限定利用。
+macOS 26.6.2で対応オプションを確認した。他のmacOS版での対応は個別確認が必要。
+追加パッケージ・ネイティブヘルパー・独自ログファイル・ローテーションは導入しない。
+
+```sh
+/usr/bin/log show --last 1h --style compact --predicate 'subsystem == "io.github.otanao1.mac-ssd-blackbox"'
+/usr/bin/log stream --level default --style compact --predicate 'subsystem == "io.github.otanao1.mac-ssd-blackbox"'
+```
+
+送信元プロセスは`log`になるため、メッセージの`origin_pid`・`occurred_at`とscan IDで対応を確認する。
+例外本文・traceback・対象パス・アカウント名は送らず、例外クラスの許可リスト、errno、SQLiteコード・名称を記録する。
+公開されるメッセージは許可したフィールドだけで構成する。
+監視側の例外、中断要求、workerの受信シグナル／利用者cancel、終了記録失敗、予期しない子終了、復旧を区別する。
+同じ記録停止の継続中は繰り返し出力せず、復旧後の再発は改めて記録する。
+
+出力は最大1秒の待ち時間を持つbest-effort。コマンド未対応・失敗・タイムアウトでも監視を止めず、ファイル等へ退避しない。
+`status`の`diagnostic_logging`は未送信ならnull、監視本体からの最後の送信成功ならtrue、失敗ならfalse（workerの送信状態は含まない）。
+trueはOSによる保存・検索可能性を保証せず、保持期間もOSに従う。
+診断ログはOS管理領域（内蔵SSDを含む）に保存され得る。容量観測・Incident・スキャン履歴・永続DB/journalは従来どおり指定保存先のみ。
+既存SQLiteスキーマ、監視周期、スキャン方式、例外時の中断・復旧方針は変更しない。
+この改修は原因追跡の欠落を補い、実機L2の予期しないcancelledの根本原因を修正済みとするものではない。
+
+合成イベントの送信・専用subsystem/scan IDでの検索、合成個人情報の非出力をmacOS 26.6.2 / Python 3.11.8で確認済み。本番環境への適用・実機L2再実行はこの改修では行っていない。
