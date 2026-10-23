@@ -295,17 +295,18 @@ class LifecycleTest(unittest.TestCase):
         events = []
         advance(self.store, self.targets, notify=events.append)
         item = details(self.store, incident_id)[0]
-        self.assertEqual(item['state'], 'identified')
+        self.assertEqual(item['state'], 'unidentified')
+        self.assertEqual(item['evaluation']['reason'], 'no_baseline')
         self.assertIn(l9, item['scan_ids'])
         self.assertIn(baseline, item['scan_ids'])
         self.assertEqual(item['candidates'][0]['delta'], 2*GIB)
-        self.assertEqual(events[0]['state'], 'identified')
+        self.assertEqual(events[0]['state'], 'unidentified')
         note(self.store, incident_id, 'Synthetic investigation note')
         # Independent lifetimes: expire ordinary scans after one year, Incident after three.
         maintain(self.store, utc('2028-01-01'), dict(l1_years=1, l2_years=1, l3_years=1, l9_years=1))
         self.assertFalse(self.store.rows('SELECT * FROM scans'))
         item = details(self.store, incident_id)[0]
-        self.assertTrue(item['investigation'][-1]['scans'][l9]['excerpt'])
+        self.assertTrue(item['investigation'][-1]['target_evaluations']['/synthetic/cache/*']['excerpt'])
         self.assertEqual(item['notes'], 'Synthetic investigation note')
         maintain(self.store, utc('2030-01-01'))
         self.assertFalse(details(self.store))
@@ -421,8 +422,206 @@ class LifecycleTest(unittest.TestCase):
             advance(self.store, self.targets)
         item = details(self.store, item['id'])[0]
         self.assertEqual(item['state'], 'identified')
-        self.assertEqual(item['investigation'][-1]['scans'][recent]['changes'][0]['delta'], 2*GIB)
+        self.assertEqual(item['investigation'][-1]['target_evaluations']['/synthetic/cache/*']['changes'][0]['delta'], 2*GIB)
         self.assertIn(prior, item['scan_ids'])
+
+    def prepare_l9(self, roots=('/synthetic/cache',)):
+        targets = dict(L3=[root+'/*' for root in roots], L2=[])
+        self.scan(when=self.now-3600, values={root: GIB for root in roots})
+        item = self.trigger(targets)
+        self.scan(ident=item['investigation'][0]['scan_id'], values={root: 3*GIB for root in roots})
+        with patch('blackbox.incidents.time.time', return_value=self.now):
+            advance(self.store, targets)
+        self.assertEqual(details(self.store, item['id'])[0]['stage'], 'L9')
+        self.store.execute('DELETE FROM waiting')  # emulate dispatch for synthetic L9 rows
+        return item['id']
+
+    def l9_scan(self, when, values, roots=('/synthetic/cache',), state='succeeded', options=None, files=None):
+        ident = self.scan('L9', when, values, state=state)
+        self.store.execute('UPDATE scans SET targets=?,options=? WHERE id=?',
+                           (json.dumps([root+'/*' for root in roots]), json.dumps(options or DEFAULT_OPTIONS), ident))
+        for path, value in (files or {}).items():
+            self.store.execute('INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?)',
+                               (ident, path, 'file', value, value, 'ok', None, None, None))
+        return ident
+
+    def finish_l9(self, ident):
+        advance(self.store, self.targets)
+        item = details(self.store, ident)[0]
+        self.assertEqual(item['stage'], 'done')
+        return item, item['investigation'][-1]['target_evaluations']
+
+    def test_l9_success_without_baseline_keeps_evidence_unidentified(self):
+        ident = self.prepare_l9()
+        scan = self.l9_scan(self.now+10, {'/synthetic/cache': 3*GIB}, files={'/synthetic/cache/large': 2*GIB})
+        item, evaluations = self.finish_l9(ident)
+        ev = evaluations['/synthetic/cache/*']
+        self.assertEqual(item['state'], 'unidentified')
+        self.assertEqual(ev['state'], 'succeeded')
+        self.assertTrue(ev['scan_complete'])
+        self.assertFalse(ev['has_baseline'])
+        self.assertEqual(ev['reason'], 'no_baseline')
+        self.assertTrue(any(r['kind']=='file' for r in ev['excerpt']))
+        self.assertIn(scan, item['scan_ids'])
+
+    def test_l9_threshold_equality_identifies_directory(self):
+        ident = self.prepare_l9()
+        before = self.l9_scan(self.now-100, {'/synthetic/cache': GIB})
+        after = self.l9_scan(self.now+10, {'/synthetic/cache': 2*GIB})
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(item['state'], 'identified')
+        self.assertEqual(item['evaluation']['reason'], 'growth_identified')
+        finding = evaluations['/synthetic/cache/*']['findings'][0]
+        self.assertEqual((finding['kind'], finding['before_bytes'], finding['bytes'], finding['delta']),
+                         ('directory', GIB, 2*GIB, GIB))
+        self.assertEqual((finding['baseline_id'], finding['scan_id']), (before, after))
+        self.assertIn(before, item['scan_ids'])
+        maintain(self.store, utc('2028-01-01'), dict(l1_years=1, l2_years=1, l3_years=1, l9_years=1))
+        self.assertFalse(self.store.rows('SELECT * FROM scans'))
+        kept = details(self.store, ident)[0]
+        self.assertEqual(kept['evaluation']['reason'], 'growth_identified')
+        self.assertEqual(kept['evaluation']['findings'][0], finding)
+
+    def test_l9_below_threshold_keeps_half_threshold_candidate_insufficient(self):
+        ident = self.prepare_l9()
+        self.l9_scan(self.now-100, {'/synthetic/cache': GIB})
+        self.l9_scan(self.now+10, {'/synthetic/cache': 2*GIB-1})
+        item, evaluations = self.finish_l9(ident)
+        ev = evaluations['/synthetic/cache/*']
+        self.assertEqual((item['state'], ev['reason']), ('unidentified', 'insufficient_evidence'))
+        self.assertTrue(ev['has_baseline'])
+        self.assertEqual(ev['changes'][0]['delta'], GIB-1)
+        self.assertFalse(ev['findings'])
+
+    def test_l9_file_and_parent_findings_are_individual_deltas(self):
+        ident = self.prepare_l9()
+        self.l9_scan(self.now-100, {'/synthetic/cache': GIB}, files={'/synthetic/cache/large': GIB//2})
+        self.l9_scan(self.now+10, {'/synthetic/cache': 3*GIB}, files={'/synthetic/cache/large': 2*GIB})
+        item, evaluations = self.finish_l9(ident)
+        findings = evaluations['/synthetic/cache/*']['findings']
+        self.assertEqual(item['state'], 'identified')
+        self.assertEqual({f['kind'] for f in findings}, {'file', 'directory'})
+        self.assertEqual({f['delta'] for f in findings}, {2*GIB, 3*GIB//2})
+        self.assertNotIn('total_growth', item['evaluation'])
+
+    def test_l9_parent_and_file_subthreshold_growth_is_not_added(self):
+        ident = self.prepare_l9()
+        self.l9_scan(self.now-100, {'/synthetic/cache': GIB}, files={'/synthetic/cache/large': GIB//2})
+        self.l9_scan(self.now+10, {'/synthetic/cache': 7*GIB//4}, files={'/synthetic/cache/large': 5*GIB//4})
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(item['state'], 'unidentified')
+        self.assertEqual(evaluations['/synthetic/cache/*']['reason'], 'insufficient_evidence')
+        self.assertFalse(item['evaluation']['findings'])
+
+    def test_l9_unrecorded_file_is_not_treated_as_zero(self):
+        ident = self.prepare_l9()
+        self.l9_scan(self.now-100, {'/synthetic/cache': 3*GIB})
+        self.l9_scan(self.now+10, {'/synthetic/cache': 3*GIB}, files={'/synthetic/cache/new': 2*GIB})
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(item['state'], 'unidentified')
+        self.assertEqual(evaluations['/synthetic/cache/*']['compared_count'], 1)
+        self.assertEqual(evaluations['/synthetic/cache/*']['reason'], 'insufficient_evidence')
+
+    def test_l9_mixed_targets_no_baseline_does_not_block_identified(self):
+        roots = ('/synthetic/cache', '/synthetic/cache-other')
+        ident = self.prepare_l9(roots)
+        self.l9_scan(self.now-100, {roots[0]: GIB}, roots=roots[:1])
+        self.l9_scan(self.now+10, {root: 3*GIB for root in roots}, roots=roots)
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(item['state'], 'identified')
+        self.assertEqual(evaluations[roots[0]+'/*']['reason'], 'growth_identified')
+        self.assertEqual(evaluations[roots[1]+'/*']['reason'], 'no_baseline')
+        self.assertFalse(evaluations[roots[1]+'/*']['findings'])
+        self.assertTrue(all(c['path']==roots[0] for c in evaluations[roots[0]+'/*']['changes']))
+        self.assertEqual(set(item['evaluation']['reasons']), {'growth_identified', 'no_baseline'})
+
+    def test_l9_partial_shared_scan_preserves_successful_target(self):
+        roots = ('/synthetic/cache', '/synthetic/cache-other')
+        ident = self.prepare_l9(roots)
+        self.l9_scan(self.now-100, {roots[0]: GIB, roots[1]: None}, roots=roots, state='partial')
+        self.l9_scan(self.now+10, {roots[0]: 2*GIB, roots[1]: None}, roots=roots, state='partial')
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(item['state'], 'identified')
+        self.assertEqual(evaluations[roots[0]+'/*']['state'], 'partial')
+        self.assertTrue(evaluations[roots[0]+'/*']['scan_complete'])
+        self.assertEqual(evaluations[roots[0]+'/*']['reason'], 'growth_identified')
+        self.assertEqual(evaluations[roots[1]+'/*']['reason'], 'scan_incomplete')
+        self.assertFalse(evaluations[roots[1]+'/*']['scan_complete'])
+
+    def test_l9_normal_file_pair_identifies_growth_with_partial_directory(self):
+        ident = self.prepare_l9()
+        before = self.l9_scan(self.now-100, {'/synthetic/cache': None}, state='partial',
+                              files={'/synthetic/cache/large': GIB})
+        self.l9_scan(self.now+10, {'/synthetic/cache': None}, state='partial',
+                     files={'/synthetic/cache/large': 2*GIB})
+        item, evaluations = self.finish_l9(ident)
+        ev = evaluations['/synthetic/cache/*']
+        self.assertEqual((item['state'], ev['reason']), ('identified', 'growth_identified'))
+        self.assertFalse(ev['scan_complete'])
+        self.assertFalse(ev['baseline_complete'])
+        self.assertTrue(ev['has_baseline'])
+        self.assertEqual(ev['findings'][0]['kind'], 'file')
+        self.assertEqual(ev['findings'][0]['baseline_id'], before)
+        self.assertGreater(ev['failures'], 0)
+        self.assertTrue(ev['baseline_failure_excerpts'])
+
+    def test_l9_separate_targets_subthreshold_growth_is_not_added(self):
+        roots = ('/synthetic/cache', '/synthetic/cache-other')
+        ident = self.prepare_l9(roots)
+        self.l9_scan(self.now-100, {root: GIB for root in roots}, roots=roots)
+        self.l9_scan(self.now+10, {root: 7*GIB//4 for root in roots}, roots=roots)
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(item['state'], 'unidentified')
+        self.assertTrue(all(ev['reason']=='insufficient_evidence' for ev in evaluations.values()))
+        self.assertTrue(all(len(ev['changes'])==1 for ev in evaluations.values()))
+
+    def test_l9_different_options_are_not_comparable(self):
+        ident = self.prepare_l9()
+        self.l9_scan(self.now-100, {'/synthetic/cache': GIB}, options=dict(threshold=GIB, max_depth=6))
+        self.l9_scan(self.now+10, {'/synthetic/cache': 3*GIB})
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(item['state'], 'unidentified')
+        self.assertEqual(evaluations['/synthetic/cache/*']['reason'], 'no_baseline')
+        self.assertIsNone(evaluations['/synthetic/cache/*']['baseline_id'])
+
+    def test_l9_cancelled_scan_is_not_no_baseline(self):
+        ident = self.prepare_l9()
+        self.l9_scan(self.now+10, {'/synthetic/cache': 3*GIB}, state='cancelled')
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(item['state'], 'unidentified')
+        self.assertEqual(evaluations['/synthetic/cache/*']['reason'], 'scan_incomplete')
+        self.assertFalse(evaluations['/synthetic/cache/*']['has_baseline'])
+
+    def test_l9_incomplete_baseline_is_recorded_as_incomplete(self):
+        ident = self.prepare_l9()
+        before = self.l9_scan(self.now-100, {'/synthetic/cache': None}, state='partial')
+        self.l9_scan(self.now+10, {'/synthetic/cache': 3*GIB})
+        item, evaluations = self.finish_l9(ident)
+        ev = evaluations['/synthetic/cache/*']
+        self.assertEqual((item['state'], ev['reason']), ('unidentified', 'scan_incomplete'))
+        self.assertEqual(ev['baseline_id'], before)
+        self.assertFalse(ev['baseline_complete'])
+
+    def test_l9_older_complete_baseline_preferred_to_incomplete_attempt(self):
+        ident = self.prepare_l9()
+        before = self.l9_scan(self.now-200, {'/synthetic/cache': GIB})
+        self.l9_scan(self.now-100, {'/synthetic/cache': None}, state='partial')
+        self.l9_scan(self.now+10, {'/synthetic/cache': 3*GIB})
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(item['state'], 'identified')
+        self.assertEqual(evaluations['/synthetic/cache/*']['baseline_id'], before)
+
+    def test_l9_finding_is_not_lost_outside_twenty_change_excerpts(self):
+        ident = self.prepare_l9()
+        files = {f'/synthetic/cache/file{n}': 100*GIB for n in range(21)}
+        self.l9_scan(self.now-100, {'/synthetic/cache': 2200*GIB}, files=files)
+        self.l9_scan(self.now+10, {'/synthetic/cache': 2201*GIB}, files={path: GIB for path in files})
+        item, evaluations = self.finish_l9(ident)
+        ev = evaluations['/synthetic/cache/*']
+        self.assertEqual(item['state'], 'identified')
+        self.assertEqual(len(ev['changes']), 20)
+        self.assertFalse(any(c['kind']=='directory' for c in ev['changes']))
+        self.assertEqual(ev['findings'][0]['kind'], 'directory')
 
     def test_unprocessed_observations_are_detected_in_order(self):
         self.l1(self.now-120, 20*GIB)
@@ -452,7 +651,7 @@ class LifecycleTest(unittest.TestCase):
             self.store.execute("UPDATE scans SET state='succeeded' WHERE id=?", (l9,))
             advance(self.store, self.targets)
         self.assertEqual(len(details(self.store)), 2)
-        self.assertTrue(all(i['state']=='identified' and l9 in i['scan_ids'] for i in details(self.store)))
+        self.assertTrue(all(i['state']=='unidentified' and i['evaluation']['reason']=='no_baseline' and l9 in i['scan_ids'] for i in details(self.store)))
 
     def test_real_workers_complete_unidentified_investigation(self):
         events = []

@@ -127,21 +127,24 @@ def detect(store, targets, settings=None):
                               json.dumps(item['scan_ids']), item['stage'], time.time()))
 
 
-def _evaluate(store, item, step):
+def _evaluate(store, item, step, root=None):
     scan = store.rows('SELECT * FROM scans WHERE id=?', (step['scan_id'],))
     if not scan or scan[0]['state'] not in TERMINAL:
         return False
     scan = scan[0]
     step.update(state=scan['state'], error=scan['error'], started=scan['started'], ended=scan['ended'],
                 targets=json.loads(scan['targets']), options=json.loads(scan['options']))
-    baseline = store.rows('SELECT started,ended,state FROM scans WHERE id=?', (step.get('baseline_id'),))
+    baseline = store.rows('SELECT started,ended,state,error FROM scans WHERE id=?', (step.get('baseline_id'),))
     step['baseline'] = baseline[0] if baseline else None
     # Per-path comparisons avoid treating a changed configuration or missing baseline as growth.
+    scope = '' if root is None else ' AND (r.path=? OR substr(r.path,1,?)=?)'
+    prefix = root.rstrip('/')+'/' if root is not None else None
+    args = (step.get('baseline_id'), step['scan_id']) + ((root, len(prefix), prefix) if root is not None else ())
     rows = store.db.execute('''SELECT r.path,r.kind,r.bytes,r.status,r.error,b.bytes AS before_bytes,b.status AS before_status
         FROM results r LEFT JOIN results b ON b.scan_id=? AND b.path=r.path AND b.kind=r.kind
-        WHERE r.scan_id=? ORDER BY r.path,r.kind''', (step.get('baseline_id'), step['scan_id']))
+        WHERE r.scan_id=?''' + scope + ' ORDER BY r.path,r.kind', args)
     changes, candidates = [], []
-    change_count = 0
+    change_count = compared_count = 0
     threshold = item['detection']['threshold']
     failures = 0
     failure_excerpts = []
@@ -152,6 +155,7 @@ def _evaluate(store, item, step):
                 failure_excerpts.append(dict(path=row['path'], kind=row['kind'], status=row['status'], error=row['error']))
         if row['status'] != 'ok' or row['before_status'] != 'ok' or row['bytes'] is None or row['before_bytes'] is None:
             continue
+        compared_count += 1
         delta = row['bytes']-row['before_bytes']
         if delta:
             change = dict(path=row['path'], kind=row['kind'], before_bytes=row['before_bytes'], bytes=row['bytes'], delta=delta)
@@ -162,9 +166,76 @@ def _evaluate(store, item, step):
             if delta >= threshold*.5 and row['kind'] in ('directory', 'file'):
                 candidates.append(change)
     # Keep evaluated differences, not complete raw scans. Bound excerpts, retain counts.
-    step.update(change_count=change_count, changes=changes, failures=failures, failure_excerpts=failure_excerpts)
+    step.update(compared_count=compared_count, change_count=change_count, changes=changes,
+                failures=failures, failure_excerpts=failure_excerpts)
     item['candidates'] = candidates
     return True
+
+
+def _l9_complete(store, scan, root):
+    """A shared partial scan can still contain a completely acquired target."""
+    if scan['state'] not in ('succeeded', 'partial'):
+        return False
+    row = store.db.execute("SELECT status,bytes FROM results WHERE scan_id=? AND path=? AND kind IN ('directory','file')",
+                           (scan['id'], root)).fetchone()
+    if not row or row['status'] != 'ok' or row['bytes'] is None:
+        return False
+    prefix = root.rstrip('/')+'/'
+    return store.db.execute("""SELECT 1 FROM results WHERE scan_id=?
+        AND (path=? OR substr(path,1,?)=?) AND status NOT IN ('ok','deduplicated') LIMIT 1""",
+        (scan['id'], root, len(prefix), prefix)).fetchone() is None
+
+
+def _evaluate_l9(store, item, target, scan, options):
+    root = target.removesuffix('/*')
+    baseline, incomplete = None, None
+    for raw in store.db.execute("SELECT * FROM scans WHERE layer='L9' AND ended<? AND started IS NOT NULL ORDER BY ended DESC", (scan['started'],)):
+        prior = dict(raw)
+        if target not in json.loads(prior['targets']) or json.loads(prior['options']) != options:
+            continue
+        evaluation = dict(layer='L9', target=target, scan_id=scan['id'], baseline_id=prior['id'])
+        compared = dict(detection=item['detection'])
+        _evaluate(store, compared, evaluation, root=root)
+        if prior['state'] in ('succeeded', 'partial') and evaluation['compared_count']:
+            baseline = prior
+            break
+        if incomplete is None:
+            incomplete = prior
+    if baseline is None:
+        baseline = incomplete
+        evaluation = dict(layer='L9', target=target, scan_id=scan['id'],
+                          baseline_id=baseline['id'] if baseline else None)
+        compared = dict(detection=item['detection'])
+        _evaluate(store, compared, evaluation, root=root)
+    prefix = root.rstrip('/')+'/'
+    evaluation['excerpt'] = store.rows("""SELECT * FROM results WHERE scan_id=?
+        AND (path=? OR substr(path,1,?)=?) ORDER BY bytes DESC LIMIT 20""",
+        (scan['id'], root, len(prefix), prefix))
+    evaluation['baseline_failure_excerpts'] = store.rows("""SELECT path,kind,status,error FROM results
+        WHERE scan_id=? AND (path=? OR substr(path,1,?)=?)
+        AND status NOT IN ('ok','deduplicated') ORDER BY path,kind LIMIT 20""",
+        (evaluation['baseline_id'], root, len(prefix), prefix))
+    complete = _l9_complete(store, scan, root)
+    baseline_complete = baseline is not None and _l9_complete(store, baseline, root)
+    evaluation.update(scan_complete=complete, baseline_complete=baseline_complete,
+                      has_baseline=baseline is not None and baseline['state'] in ('succeeded', 'partial')
+                      and evaluation['compared_count'] > 0)
+    # Candidates still use 0.5T. Final findings require an individual L9 delta >= T;
+    # never add parent/child or separate target deltas together.
+    evaluation['findings'] = [dict(change, target=target, scan_id=scan['id'], baseline_id=evaluation['baseline_id'])
+        for change in compared['candidates']
+        if scan['state'] in ('succeeded', 'partial') and evaluation['has_baseline']
+        and change['delta'] >= item['detection']['threshold']]
+    if evaluation['findings']:
+        reason = 'growth_identified'
+    elif not complete or (baseline is not None and not baseline_complete):
+        reason = 'scan_incomplete'
+    elif not evaluation['has_baseline']:
+        reason = 'no_baseline'
+    else:
+        reason = 'insufficient_evidence'
+    evaluation['reason'] = reason
+    return evaluation
 
 
 def advance(store, targets, settings=None, notify=None):
@@ -199,7 +270,8 @@ def advance(store, targets, settings=None, notify=None):
                 _persist(store, item)
         elif item['stage'] == 'L9':
             step = item['investigation'][-1]
-            unresolved, successful = False, True
+            unresolved = False
+            step['target_evaluations'] = {}
             for target in step['targets']:
                 found = None
                 for raw in store.db.execute("SELECT * FROM scans WHERE layer='L9' AND started>=? ORDER BY started DESC", (step['requested']-cfg['l9_cooldown'],)):
@@ -210,34 +282,32 @@ def advance(store, targets, settings=None, notify=None):
                 if not found:
                     waiting = store.rows('SELECT 1 FROM waiting WHERE target=? AND options=?', (target, json.dumps(step['options'], sort_keys=True)))
                     unresolved |= bool(waiting)
-                    successful = False
+                    step['target_evaluations'][target] = dict(scan_id=None, state=None,
+                        scan_complete=False, baseline_id=None, baseline_complete=False, has_baseline=False, findings=[],
+                        reason=None if waiting else 'scan_incomplete')
                     continue
                 if found['id'] not in item['scan_ids']:
                     item['scan_ids'].append(found['id'])
+                step['scans'][found['id']] = {k: found[k] for k in ('state', 'error', 'started', 'ended', 'targets', 'options')}
                 if found['state'] not in TERMINAL:
                     unresolved = True
+                    step['target_evaluations'][target] = dict(scan_id=found['id'], state=found['state'],
+                        scan_complete=False, baseline_id=None, baseline_complete=False, has_baseline=False, findings=[], reason=None)
                     continue
-                successful &= found['state'] == 'succeeded'
-                excerpt = store.rows('SELECT * FROM results WHERE scan_id=? ORDER BY bytes DESC LIMIT 20', (found['id'],))
-                root = target.removesuffix('/*')
-                successful &= any(r['path'] == root and r['status'] == 'ok' and
-                                  (r['bytes'] or 0) >= item['detection']['threshold']*.5
-                                  for r in store.rows('SELECT path,status,bytes FROM results WHERE scan_id=? AND path=?', (found['id'], root)))
-                evaluation = dict(layer='L9', scan_id=found['id'], baseline_id=None)
-                for prior in store.db.execute("SELECT * FROM scans WHERE layer='L9' AND ended<? AND state IN ('succeeded','partial') ORDER BY ended DESC", (found['started'],)):
-                    if target in json.loads(prior['targets']) and json.loads(prior['options']) == step['options']:
-                        evaluation['baseline_id'] = prior['id']
-                        if prior['id'] not in item['scan_ids']:
-                            item['scan_ids'].append(prior['id'])
-                        break
-                _evaluate(store, dict(detection=item['detection']), evaluation)
-                evaluation['excerpt'] = excerpt
-                step['scans'][found['id']] = evaluation
+                evaluation = _evaluate_l9(store, item, target, found, step['options'])
+                if evaluation['baseline_id'] and evaluation['baseline_id'] not in item['scan_ids']:
+                    item['scan_ids'].append(evaluation['baseline_id'])
+                step['target_evaluations'][target] = evaluation
             if not unresolved:
-                # A candidate with sufficient measured growth and complete L9 evidence can be identified.
-                enough_growth = any(c['delta'] >= item['detection']['threshold'] for c in item['candidates'])
-                item.update(state='identified' if successful and enough_growth else 'unidentified', stage='done')
-                item['evaluation']['conclusion'] = 'Observed directory/file growth; application root cause is not guaranteed' if item['state']=='identified' else 'Insufficient comparable or complete evidence'
+                evaluations = list(step['target_evaluations'].values())
+                findings = [finding for ev in evaluations if ev['reason']=='growth_identified' for finding in ev['findings']]
+                reasons = list(dict.fromkeys(ev['reason'] for ev in evaluations))
+                reason = 'growth_identified' if findings else next(
+                    (r for r in ('scan_incomplete', 'no_baseline', 'insufficient_evidence') if r in reasons),
+                    'insufficient_evidence')
+                item.update(state='identified' if findings else 'unidentified', stage='done')
+                item['evaluation'].update(reason=reason, reasons=reasons, findings=findings,
+                    conclusion='Observed L9 directory/file growth; application root cause is not guaranteed' if findings else 'Insufficient comparable or complete L9 evidence')
                 finished = True
             with store.db:
                 _persist(store, item)
