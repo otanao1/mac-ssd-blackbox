@@ -1,4 +1,4 @@
-"""One metadata walk, shared by L2/L3/L9. Never read file contents."""
+"""Detailed Python walk for L9 (legacy L2/L3 reference). Never read file contents."""
 import os
 from pathlib import Path
 import plistlib

@@ -40,12 +40,12 @@ def maintain(store, now, settings=None):
             store.db.execute(f"DELETE FROM results WHERE scan_id IN (SELECT id FROM scans WHERE layer=? AND state NOT IN ('running','pending') AND coalesce(started,created)<? AND id NOT IN ({protected}))", (layer, cutoff))
             store.db.execute(f"DELETE FROM scans WHERE layer=? AND state NOT IN ('running','pending') AND coalesce(started,created)<? AND id NOT IN ({protected})", (layer, cutoff))
         # Summarize only whole buckets; never summarize a partially aged UTC day.
-        days = store.db.execute(f"SELECT DISTINCT cast(coalesce(started,created)/? AS INTEGER)*? FROM scans WHERE layer='L3' AND state NOT IN ('running','pending') AND coalesce(started,created)<? AND id NOT IN ({protected}) ORDER BY 1", (width, width, raw_cutoff)).fetchall()
+        days = store.db.execute(f"SELECT DISTINCT cast(coalesce(started,created)/? AS INTEGER)*? FROM scans WHERE layer='L3' AND scan_version=2 AND state NOT IN ('running','pending') AND coalesce(started,created)<? AND id NOT IN ({protected}) ORDER BY 1", (width, width, raw_cutoff)).fetchall()
         for (day,) in days:
             args = (day, day+width)
-            eligible = f"SELECT id FROM scans WHERE layer='L3' AND state NOT IN ('running','pending') AND coalesce(started,created)>=? AND coalesce(started,created)<? AND id NOT IN ({protected})"
+            eligible = f"SELECT id FROM scans WHERE layer='L3' AND scan_version=2 AND state NOT IN ('running','pending') AND coalesce(started,created)>=? AND coalesce(started,created)<? AND id NOT IN ({protected})"
             # A bucket containing protected or running scans is deferred as a whole.
-            if store.db.execute(f"SELECT 1 FROM scans WHERE layer='L3' AND coalesce(started,created)>=? AND coalesce(started,created)<? AND (state IN ('pending','running') OR id IN ({protected})) LIMIT 1", args).fetchone():
+            if store.db.execute(f"SELECT 1 FROM scans WHERE layer='L3' AND scan_version=2 AND coalesce(started,created)>=? AND coalesce(started,created)<? AND (state IN ('pending','running') OR id IN ({protected})) LIMIT 1", args).fetchone():
                 continue
             cursor = store.db.execute(f"SELECT r.*,coalesce(s.started,s.created) AS observed FROM results r JOIN scans s ON s.id=r.scan_id WHERE s.id IN ({eligible}) ORDER BY path,kind,observed,s.id", args)
             key, stats = None, None
@@ -60,7 +60,7 @@ def maintain(store, now, settings=None):
                 if pair != key:
                     save()
                     key, previous = pair, None
-                    stats = dict(samples=0, valid=0, failures=0, first_time=None, last_time=None,
+                    stats = dict(scan_version=2, samples=0, valid=0, failures=0, first_time=None, last_time=None,
                                  first_bytes=None, last_bytes=None, min_bytes=None, max_bytes=None,
                                  mean_bytes=None, max_increase=0, max_decrease=0, sum_bytes=0)
                 stats['samples'] += 1

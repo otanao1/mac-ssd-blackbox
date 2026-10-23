@@ -8,6 +8,8 @@ from pathlib import Path
 import time
 import uuid
 
+from .store import scan_version
+
 GIB = 1024**3
 DEFAULT_THRESHOLDS = dict(drop_minute=GIB, drop_day=5*GIB, low_space=5*GIB,
                           l9_cooldown=1800)
@@ -53,11 +55,11 @@ def _enqueue(store, item, layer, targets):
         return False
     from .runtime import DEFAULT_OPTIONS
     ident = uuid.uuid4().hex
-    store.db.execute("INSERT INTO scans(id,layer,trigger,targets,options,state,created,total) VALUES(?,?,?,?,?,'pending',?,?)",
-                     (ident, layer, 'incident', json.dumps(targets), json.dumps(DEFAULT_OPTIONS), time.time(), len(targets)))
+    store.db.execute("INSERT INTO scans(id,layer,trigger,targets,options,state,created,total,scan_version) VALUES(?,?,?,?,?,'pending',?,?,?)",
+                     (ident, layer, 'incident', json.dumps(targets), json.dumps(DEFAULT_OPTIONS), time.time(), len(targets), scan_version(layer)))
     item['scan_ids'].append(ident)
-    baseline = store.db.execute("SELECT id FROM scans WHERE layer=? AND state IN ('succeeded','partial') AND ended<=? ORDER BY ended DESC LIMIT 1",
-                                (layer, item['detected'])).fetchone()
+    baseline = store.db.execute("SELECT id FROM scans WHERE layer=? AND scan_version=? AND state IN ('succeeded','partial') AND ended<=? ORDER BY ended DESC LIMIT 1",
+                                (layer, scan_version(layer), item['detected'])).fetchone()
     step = dict(layer=layer, scan_id=ident, baseline_id=baseline['id'] if baseline else None)
     if baseline:
         item['scan_ids'].append(baseline['id'])
@@ -134,7 +136,11 @@ def _evaluate(store, item, step, root=None):
     scan = scan[0]
     step.update(state=scan['state'], error=scan['error'], started=scan['started'], ended=scan['ended'],
                 targets=json.loads(scan['targets']), options=json.loads(scan['options']))
-    baseline = store.rows('SELECT started,ended,state,error FROM scans WHERE id=?', (step.get('baseline_id'),))
+    baseline = store.rows('SELECT started,ended,state,error,scan_version FROM scans WHERE id=?', (step.get('baseline_id'),))
+    step['scan_version'] = scan['scan_version']
+    if baseline and baseline[0]['scan_version'] != scan['scan_version']:
+        step['baseline_id'] = None
+        baseline = []
     step['baseline'] = baseline[0] if baseline else None
     # Per-path comparisons avoid treating a changed configuration or missing baseline as growth.
     scope = '' if root is None else ' AND (r.path=? OR substr(r.path,1,?)=?)'
@@ -189,7 +195,7 @@ def _l9_complete(store, scan, root):
 def _evaluate_l9(store, item, target, scan, options):
     root = target.removesuffix('/*')
     baseline, incomplete = None, None
-    for raw in store.db.execute("SELECT * FROM scans WHERE layer='L9' AND ended<? AND started IS NOT NULL ORDER BY ended DESC", (scan['started'],)):
+    for raw in store.db.execute("SELECT * FROM scans WHERE layer='L9' AND scan_version=? AND ended<? AND started IS NOT NULL ORDER BY ended DESC", (scan['scan_version'], scan['started'])):
         prior = dict(raw)
         if target not in json.loads(prior['targets']) or json.loads(prior['options']) != options:
             continue

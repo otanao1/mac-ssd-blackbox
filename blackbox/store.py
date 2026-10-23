@@ -6,6 +6,10 @@ import sqlite3
 import time
 import uuid
 
+def scan_version(layer):
+    return 2 if layer in ('L2', 'L3') else 1
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS scans (
  id TEXT PRIMARY KEY, layer TEXT NOT NULL, trigger TEXT NOT NULL,
@@ -13,7 +17,7 @@ CREATE TABLE IF NOT EXISTS scans (
  created REAL NOT NULL, started REAL, ended REAL, pid INTEGER,
  current TEXT, completed INTEGER NOT NULL DEFAULT 0,
  total INTEGER NOT NULL DEFAULT 0, cancel INTEGER NOT NULL DEFAULT 0,
- error TEXT, metrics TEXT);
+ error TEXT, metrics TEXT, scan_version INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX IF NOT EXISTS scan_state_created ON scans(state,created);
 CREATE INDEX IF NOT EXISTS scan_layer_started ON scans(layer,started);
 CREATE TABLE IF NOT EXISTS results (
@@ -70,6 +74,38 @@ class Store:
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.executescript(SCHEMA)
         self.db.commit()
+        try:
+            self._migrate_scans()
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _migrate_scans(self):
+        """One atomic transition; callers must stop the old runtime before upgrading."""
+        self.check()
+        columns = {r[1] for r in self.db.execute("PRAGMA table_info(scans)")}
+        if "scan_version" in columns and self.db.execute("SELECT 1 FROM meta WHERE key='du_scan_migration_v2'").fetchone():
+            return
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            if "scan_version" not in {r[1] for r in self.db.execute("PRAGMA table_info(scans)")}:
+                self.db.execute("ALTER TABLE scans ADD COLUMN scan_version INTEGER NOT NULL DEFAULT 1")
+            if self.db.execute("SELECT 1 FROM meta WHERE key='du_scan_migration_v2'").fetchone():
+                return
+            affected = self.db.execute("""SELECT DISTINCT i.* FROM incidents i
+                JOIN json_each(i.scan_ids) j JOIN scans s ON s.id=j.value
+                WHERE i.state='investigating' AND s.layer IN ('L2','L3') AND s.scan_version<2""").fetchall()
+            for raw in affected:
+                evaluation = json.loads(raw["evaluation"])
+                evaluation.update(reason="scan_version_migration", conclusion="Old capacity history removed; investigation requires a new baseline")
+                self.db.execute("UPDATE incidents SET state='unidentified',stage='done',evaluation=?,updated=? WHERE id=?",
+                                (json.dumps(evaluation), time.time(), raw["id"]))
+            self.db.execute("DELETE FROM results WHERE scan_id IN (SELECT id FROM scans WHERE layer IN ('L2','L3') AND scan_version<2)")
+            self.db.execute("DELETE FROM scans WHERE layer IN ('L2','L3') AND scan_version<2")
+            self.db.execute("DELETE FROM l3_daily")
+            self.db.execute("DELETE FROM meta WHERE key IN ('due_L2','due_L3')")
+            self.db.execute("INSERT INTO meta VALUES('du_scan_migration_v2',?)", (str(time.time()),))
+            self.check()
 
     def check(self):
         if self.identity is not None:
@@ -112,8 +148,8 @@ class Store:
 
     def create_scan(self, layer, targets, options, trigger='manual', state='pending'):
         ident = uuid.uuid4().hex
-        self.execute('INSERT INTO scans(id,layer,trigger,targets,options,state,created,total) VALUES(?,?,?,?,?,?,?,?)',
-                     (ident, layer, trigger, json.dumps(targets), json.dumps(options), state, time.time(), len(targets)))
+        self.execute('INSERT INTO scans(id,layer,trigger,targets,options,state,created,total,scan_version) VALUES(?,?,?,?,?,?,?,?,?)',
+                     (ident, layer, trigger, json.dumps(targets), json.dumps(options), state, time.time(), len(targets), scan_version(layer)))
         return ident
 
     def close(self):
