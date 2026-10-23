@@ -107,13 +107,15 @@ class LifecycleTest(unittest.TestCase):
 
     def test_detection_rules_idempotence_and_low_entry(self):
         self.l1(self.now-86400, 20*GIB)
+        detect(self.store, self.targets)
         self.l1(self.now-60, 7*GIB)
+        detect(self.store, self.targets)
         self.l1(self.now, 4*GIB, 'synthetic-new-boot')
         detect(self.store, self.targets)
         incidents = details(self.store)
         self.assertEqual({i['type'] for i in incidents}, {'DROP_SPACE', 'LOW_SPACE', 'REBOOT'})
         drop = next(i for i in incidents if i['type']=='DROP_SPACE')
-        self.assertEqual([r['rule'] for r in drop['detection']['rules']], ['minute', 'day'])
+        self.assertEqual([r['rule'] for r in drop['detection']['rules']], ['DROP_SPACE_1m', 'DROP_SPACE_24h'])
         detect(self.store, self.targets)
         self.assertEqual(len(details(self.store)), 3)
         self.l1(self.now+60, 4*GIB, 'synthetic-new-boot')
@@ -125,19 +127,21 @@ class LifecycleTest(unittest.TestCase):
         detect(self.store, self.targets)
         self.assertEqual(len([i for i in details(self.store) if i['type']=='LOW_SPACE']), 2)
 
-    def test_day_drop_plateau_does_not_repeat_after_completion_or_restart(self):
+    def test_minute_drop_plateau_120_minutes_after_completion_or_restart(self):
         self.l1(self.now-60, 20*GIB)
         self.l1(self.now, 14*GIB)
         detect(self.store, self.targets)
         self.assertEqual(len(details(self.store)), 1)
         self.assertEqual(len(self.store.rows('SELECT * FROM scans')), 1)
-        # Suppression depends on detected measurements, not investigation state.
+        # A plateau has no new minute drop, even after completion and restart.
         self.store.execute("UPDATE incidents SET state='unidentified',stage='done'")
         reopened = Store(self.data)
         try:
-            for minute in range(1, 61):
+            for minute in range(1, 121):
                 self.l1(self.now+60*minute, 14*GIB)
                 detect(reopened, self.targets)
+                if minute == 60:
+                    self.assertEqual(len(details(reopened, limit=100)), 1)
             self.assertEqual(len(details(reopened, limit=100)), 1)
             self.assertEqual(len(reopened.rows('SELECT * FROM scans')), 1)
         finally:
@@ -150,39 +154,114 @@ class LifecycleTest(unittest.TestCase):
             detect(self.store, self.targets)
         items = sorted(details(self.store), key=lambda i: i['detected'])
         self.assertEqual(len(items), 2)
-        self.assertEqual([r['rule'] for r in items[0]['detection']['rules']], ['minute', 'day'])
-        self.assertEqual([r['rule'] for r in items[1]['detection']['rules']], ['minute'])
+        self.assertEqual([r['rule'] for r in items[0]['detection']['rules']], ['DROP_SPACE_1m'])
+        self.assertEqual([r['rule'] for r in items[1]['detection']['rules']], ['DROP_SPACE_1m'])
         self.assertEqual(len(self.store.rows('SELECT * FROM scans')), 2)
 
-    def test_new_gradual_day_drop_uses_unreported_measurements(self):
-        self.l1(self.now-60, 20*GIB)
-        self.l1(self.now, 14*GIB)
-        detect(self.store, {})
-        # Each change is below the short-term threshold; together they reach 5GiB.
-        for minute in range(1, 11):
-            self.l1(self.now+60*minute, 14*GIB-minute*(GIB//2))
-            detect(self.store, {})
-        items = sorted(details(self.store), key=lambda i: i['detected'])
-        self.assertEqual(len(items), 2)
-        rule = items[1]['detection']['rules'][0]
-        self.assertEqual(rule['rule'], 'day')
-        self.assertEqual(rule['baseline']['free'], 14*GIB)
-        self.assertEqual(items[1]['evaluation']['free_change'], -5*GIB)
-        self.l1(self.now+660, 9*GIB)
-        detect(self.store, {})
-        self.assertEqual(len(details(self.store)), 2)
+    def daily_state(self, store=None):
+        return json.loads((store or self.store).rows(
+            "SELECT value FROM meta WHERE key='drop_space_24h:/synthetic/volume'")[0]['value'])
 
-    def test_recovered_space_can_trigger_a_new_day_drop(self):
-        self.l1(self.now-60, 20*GIB)
-        for minute, free in enumerate((14, 20, 14, 14)):
-            # Wide spacing exercises the day rule independently of minute detection.
-            self.l1(self.now+600*minute, free*GIB)
+    def test_minute_incident_does_not_change_daily_deadline_or_baseline(self):
+        self.l1(self.now, 20*GIB)
+        detect(self.store, {})
+        original = self.daily_state()
+        self.l1(self.now+60, 14*GIB)
+        detect(self.store, {})
+        self.assertEqual(self.daily_state(), original)
+        for minute in range(2, 12):
+            self.l1(self.now+60*minute, 14*GIB-(minute-1)*(GIB//2))
             detect(self.store, {})
+        self.assertEqual(len(details(self.store)), 1)  # no early daily evaluation
+        self.assertEqual(self.daily_state(), original)
+        self.l1(self.now+86400, 9*GIB)
+        detect(self.store, {})
         items = sorted(details(self.store), key=lambda i: i['detected'])
         self.assertEqual(len(items), 2)
-        self.assertEqual(items[1]['detected'], self.now+1200)
-        self.assertEqual(items[1]['detection']['rules'][0]['rule'], 'day')
-        self.assertEqual(items[1]['detection']['rules'][0]['baseline']['time'], self.now+600)
+        self.assertEqual(items[1]['detection']['rules'][0]['rule'], 'DROP_SPACE_24h')
+        self.assertEqual(items[1]['detection']['rules'][0]['baseline']['free'], 20*GIB)
+        self.assertEqual(items[1]['evaluation']['free_change'], -11*GIB)
+        self.assertEqual(self.daily_state()['next_due'], self.now+2*86400)
+
+    def test_daily_plateau_recovery_and_new_drop(self):
+        for day, free in enumerate((20, 14, 14, 20, 14, 14)):
+            self.l1(self.now+86400*day, free*GIB)
+            detect(self.store, {})
+            self.assertEqual(self.daily_state()['baseline']['time'], self.now+86400*day)
+        items = sorted(details(self.store), key=lambda i: i['detected'])
+        self.assertEqual([i['detected'] for i in items], [self.now+86400, self.now+4*86400])
+        self.assertTrue(all(i['detection']['rules'][0]['rule']=='DROP_SPACE_24h' for i in items))
+
+    def test_daily_once_per_24h_uses_endpoints_not_maximum(self):
+        self.l1(self.now, 20*GIB)
+        detect(self.store, {})
+        original = self.daily_state()
+        for hour in range(1, 24):
+            self.l1(self.now+hour*3600, 30*GIB)
+            detect(self.store, {})
+            self.assertEqual(self.daily_state(), original)
+        self.l1(self.now+86400, 16*GIB)  # down only 4GiB from the daily endpoint
+        detect(self.store, {})
+        self.assertFalse(details(self.store))
+        daily = self.daily_state()
+        self.assertEqual(daily['baseline']['free'], 16*GIB)
+        self.assertEqual(daily['next_due'], self.now+2*86400)
+        detect(self.store, {})  # same observation must not advance the clock
+        self.assertEqual(self.daily_state(), daily)
+        self.l1(self.now+2*86400, 11*GIB)
+        detect(self.store, {})
+        self.assertEqual(len(details(self.store)), 1)
+        self.assertEqual(details(self.store)[0]['evaluation']['free_change'], -5*GIB)
+
+    def test_daily_restart_error_and_long_gap_keep_real_endpoints(self):
+        self.l1(self.now, 20*GIB)
+        detect(self.store, {})
+        original = self.daily_state()
+        reopened = Store(self.data)
+        try:
+            self.l1(self.now+86400, 0, error='synthetic missing observation')
+            detect(reopened, {})
+            self.assertEqual(self.daily_state(reopened), original)
+            self.l1(self.now+3*86400+60, 14*GIB)
+            detect(reopened, {})
+            item = details(reopened)[0]
+            self.assertEqual([r['rule'] for r in item['detection']['rules']], ['DROP_SPACE_24h'])
+            self.assertEqual(item['evaluation']['elapsed_seconds'], 3*86400+60)
+            self.assertEqual(item['detection']['rules'][0]['baseline']['time'], self.now)
+            self.assertEqual(self.daily_state(reopened)['next_due'], self.now+4*86400+60)
+            detect(reopened, {})
+            self.assertEqual(len(details(reopened)), 1)
+        finally:
+            reopened.close()
+
+    def test_daily_and_minute_same_observation_queue_one_investigation(self):
+        self.l1(self.now, 20*GIB)
+        detect(self.store, self.targets)
+        self.l1(self.now+86400-60, 19*GIB)
+        detect(self.store, self.targets)
+        self.l1(self.now+86400, 14*GIB)
+        detect(self.store, self.targets)
+        items = details(self.store)
+        self.assertEqual(len(items), 1)
+        self.assertEqual([r['rule'] for r in items[0]['detection']['rules']], ['DROP_SPACE_1m', 'DROP_SPACE_24h'])
+        self.assertEqual(len(self.store.rows('SELECT * FROM scans')), 1)
+        self.assertEqual(self.daily_state()['baseline']['free'], 14*GIB)
+
+    def test_daily_state_and_marker_roll_back_if_incident_write_fails(self):
+        self.l1(self.now, 20*GIB)
+        detect(self.store, {})
+        original = self.daily_state()
+        self.l1(self.now+86400, 14*GIB)
+        self.store.execute("CREATE TRIGGER reject_daily BEFORE INSERT ON incidents BEGIN SELECT RAISE(ABORT,'synthetic failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            detect(self.store, {})
+        self.assertEqual(self.daily_state(), original)
+        self.assertEqual(float(self.store.rows("SELECT value FROM meta WHERE key='incident_l1_time'")[0]['value']), self.now)
+        self.store.execute('DROP TRIGGER reject_daily')
+        detect(self.store, {})
+        detect(self.store, {})
+        self.assertEqual(len(details(self.store)), 1)
+        self.assertEqual(self.daily_state()['next_due'], self.now+2*86400)
 
     def test_detection_jitter_gaps_errors_and_initial_sample(self):
         self.l1(self.now-61, 20*GIB)
@@ -309,6 +388,7 @@ class LifecycleTest(unittest.TestCase):
         self.scan('L2', self.now-86400, {'/synthetic/cache': GIB})
         self.scan('L3', self.now-3600, {'/synthetic/cache': GIB})
         self.l1(self.now-60, 7*GIB)
+        detect(self.store, self.targets)
         self.l1(self.now, 4*GIB)  # DROP + LOW; both investigations share a target
         with patch('blackbox.incidents.time.time', return_value=self.now):
             detect(self.store, self.targets)

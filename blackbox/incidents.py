@@ -92,26 +92,24 @@ def detect(store, targets, settings=None):
             drop = previous['free']-current['free']
             # Allow scheduling jitter (up to 30s), but never classify long observation gaps as minute drops.
             if 0 < elapsed <= 90 and drop*60/elapsed >= cfg['drop_minute']:
-                triggers.append(('DROP_SPACE', 'minute', cfg['drop_minute'], previous))
-            # Do not count an already reported drop again while its old peak remains
-            # in the 24-hour window. Any DROP (minute or day) accounts for measurements
-            # through its detection time, regardless of investigation state. Reuse the
-            # existing Incident record so this also survives restart/transaction rollback.
-            day_start = current['time']-86400
-            reported = store.db.execute("""SELECT max(detected) FROM incidents
-                WHERE type='DROP_SPACE' AND detected>=? AND detected<?
-                AND json_extract(detection,'$.current.path')=?""",
-                (day_start, current['time'], current['path'])).fetchone()[0]
-            if reported is not None:
-                day_start = reported
-            day = store.db.execute('SELECT * FROM l1 WHERE path=? AND time>=? AND time<? AND error IS NULL AND free IS NOT NULL ORDER BY free DESC,time LIMIT 1',
-                                   (current['path'], day_start, current['time'])).fetchone()
-            if day and day['free']-current['free'] >= cfg['drop_day']:
-                triggers.append(('DROP_SPACE', 'day', cfg['drop_day'], dict(day)))
+                triggers.append(('DROP_SPACE', 'DROP_SPACE_1m', cfg['drop_minute'], previous))
             if previous['free'] > cfg['low_space'] >= current['free']:
                 triggers.append(('LOW_SPACE', 'entry', cfg['low_space'], previous))
             if previous['boot_id'] and current['boot_id'] and previous['boot_id'] != current['boot_id']:
                 triggers.append(('REBOOT', 'boot_id', cfg['drop_minute'], previous))
+        # The daily rule has its own durable clock and endpoint measurement.
+        # Neither minute Incidents nor other Incident types advance this clock.
+        daily_key = 'drop_space_24h:' + current['path']
+        saved = store.db.execute('SELECT value FROM meta WHERE key=?', (daily_key,)).fetchone()
+        daily = json.loads(saved[0]) if saved else None
+        if daily is None or current['time'] >= daily['next_due']:
+            if daily and daily['baseline']['free']-current['free'] >= cfg['drop_day']:
+                triggers.append(('DROP_SPACE', 'DROP_SPACE_24h', cfg['drop_day'], daily['baseline']))
+            # First normal sample establishes the baseline. After a gap, evaluate
+            # once using real endpoints and schedule from this actual measurement;
+            # do not invent values or replay missed daily deadlines.
+            store.db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',
+                             (daily_key, json.dumps(dict(baseline=current, next_due=current['time']+86400))))
         # Short/day rules are a single Incident with both conditions recorded.
         for kind in dict.fromkeys(t[0] for t in triggers):
             matches = [t for t in triggers if t[0] == kind]
