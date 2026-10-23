@@ -23,6 +23,19 @@ from blackbox.store import Store
 SOURCE = Path(__file__).resolve().parents[1]
 
 
+def missing_job():
+    return subprocess.CompletedProcess([], 113, '',
+        f'Could not find service "{LABEL}" in domain for user gui: {os.getuid()}\n')
+
+
+def loaded_job(private, runtime, agent):
+    from blackbox.installation import domain
+    arguments = plistlib.loads(plist_bytes(runtime/'venv/bin/python', runtime, private))['ProgramArguments']
+    return '\n'.join([domain()+'/'+LABEL+' = {', '\tpath = '+str(agent),
+        '\tprogram = '+arguments[0], '\targuments = {',
+        *['\t\t'+arg for arg in arguments], '\t}', '\tworking directory = '+str(runtime), '}'])
+
+
 class OperationsTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -221,7 +234,9 @@ class OperationsTest(unittest.TestCase):
         self.assertEqual(plist['Label'], LABEL)
         self.assertEqual(plist['StandardErrorPath'], '/dev/null')
         self.assertEqual(plist['ProgramArguments'][-1], 'run')
-        (self.private/'installation.json').write_text(json.dumps(dict(agent='/synthetic/agent.plist')))
+        runtime = self.root/'runtime'
+        agent = runtime/'launchd.plist'
+        (self.private/'installation.json').write_text(json.dumps(dict(runtime=str(runtime), agent=str(agent), registered=False)))
         with patch('blackbox.installation.launchctl') as runner:
             runner.return_value.returncode = 1
             control('start', self.private)
@@ -229,6 +244,7 @@ class OperationsTest(unittest.TestCase):
             runner.return_value.returncode = 0
             control('start', self.private)
             self.assertEqual(runner.call_args.args[0], 'kickstart')
+            runner.return_value.stdout = loaded_job(self.private, runtime, agent)
             control('stop', self.private)
             self.assertEqual(runner.call_args.args[0], 'bootout')
 
@@ -243,7 +259,7 @@ class OperationsTest(unittest.TestCase):
             self.assertTrue((runtime/'launchd.plist').exists())
             self.assertFalse((runtime/'.git').exists())
             self.assertIn(str(runtime), cli.read_text())
-            launch.return_value.returncode = 1
+            launch.return_value = missing_job()
             uninstall(private)
         self.assertFalse(runtime.exists())
         self.assertFalse(cli.exists())
@@ -323,7 +339,7 @@ class OperationsTest(unittest.TestCase):
             result = subprocess.run([str(cli), 'config'], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(json.loads(result.stdout)['loaded'])
-            launch.return_value.returncode = 1
+            launch.return_value = missing_job()
             uninstall(private)
             original = (private/'local.json').read_bytes()
             install(SOURCE, self.data, self.root, private=private, runtime=runtime, cli=cli)
@@ -341,6 +357,7 @@ class OperationsTest(unittest.TestCase):
             agent = self.root/'Library/LaunchAgents'/(LABEL+'.plist')
             self.assertTrue(agent.exists())
             launch.return_value.returncode = 0
+            launch.return_value.stdout = loaded_job(private, runtime, agent)
             uninstall(private)
             self.assertEqual(launch.call_args.args[0], 'bootout')
             self.assertFalse(agent.exists())
