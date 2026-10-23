@@ -1,4 +1,4 @@
-"""Local SQLite persistence. No retention or Incident policy lives here."""
+"""Local SQLite persistence. History and independent Incident evidence share one database."""
 import json
 import os
 from pathlib import Path
@@ -27,6 +27,16 @@ CREATE TABLE IF NOT EXISTS l1 (
 CREATE TABLE IF NOT EXISTS waiting (
  target TEXT NOT NULL, options TEXT NOT NULL, requested REAL NOT NULL,
  PRIMARY KEY(target,options));
+CREATE TABLE IF NOT EXISTS l3_daily (
+ bucket REAL NOT NULL, width INTEGER NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL,
+ summary TEXT NOT NULL, PRIMARY KEY(bucket,width,path,kind));
+CREATE TABLE IF NOT EXISTS incidents (
+ id TEXT PRIMARY KEY, detected REAL NOT NULL, type TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('investigating','identified','unidentified')),
+ detection TEXT NOT NULL, evaluation TEXT NOT NULL, candidates TEXT NOT NULL,
+ investigation TEXT NOT NULL, notes TEXT NOT NULL, scan_ids TEXT NOT NULL,
+ stage TEXT NOT NULL, updated REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS incident_state ON incidents(state,detected);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
@@ -46,6 +56,7 @@ class Store:
         self.db = sqlite3.connect(database.as_uri() + ('?mode=rwc' if create else '?mode=rw'),
                                   uri=True, timeout=5)
         os.chmod(self.directory / 'blackbox.sqlite3', 0o600)
+        self.database_identity = (database.stat().st_dev, database.stat().st_ino)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.executescript(SCHEMA)
@@ -55,6 +66,18 @@ class Store:
         st = self.directory.stat()
         if (st.st_dev, st.st_ino) != (self.device, self.inode):
             raise OSError('data destination changed; recording stopped')
+        database = self.directory / 'blackbox.sqlite3'
+        if database.is_symlink() or (database.stat().st_dev, database.stat().st_ino) != self.database_identity:
+            raise OSError('database changed; recording stopped')
+
+    def reconnect(self):
+        # Preserve the original destination identity across failures. Never mkdir/init/fail over.
+        self.check()
+        self.db.close()
+        self.db = sqlite3.connect((self.directory / 'blackbox.sqlite3').as_uri()+'?mode=rw', uri=True, timeout=5)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute('PRAGMA foreign_keys=ON')
+        self.check()
 
     def rows(self, sql, args=()):
         self.check()

@@ -41,7 +41,8 @@ def main():
             targets.setdefault(layer, [])
             for path in sorted(Path(directory).glob('*.conf')):
                 targets[layer].extend(line.strip() for line in path.read_text().splitlines() if line.strip() and not line.lstrip().startswith('#'))
-        monitor = Monitor(args.data, targets, config.get('intervals'), config.get('l1_path', '/System/Volumes/Data'))
+        monitor = Monitor(args.data, targets, config.get('intervals'), config.get('l1_path', '/System/Volumes/Data'),
+                          retention=config.get('retention'), incident_thresholds=config.get('incident_thresholds'))
         stopped = False
         def stop(signum, frame):
             nonlocal stopped
@@ -52,8 +53,8 @@ def main():
             while not stopped:
                 try:
                     monitor.tick()
-                except (OSError, sqlite3.Error) as exc:
-                    print(f'recording stopped: {exc}', file=sys.stderr)
+                except (OSError, sqlite3.Error):
+                    pass
                 time.sleep(.2)
         finally:
             monitor.close()

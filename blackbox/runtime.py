@@ -1,4 +1,4 @@
-"""Scheduling, durable requests and child supervision; no Incident lifecycle."""
+"""Scheduling, durable requests and child supervision and Incident/retention coordination."""
 import fcntl
 import json
 import math
@@ -134,7 +134,8 @@ def worker(directory, ident, inherited_lock):
 
 
 class Monitor:
-    def __init__(self, directory, targets=None, intervals=None, l1_path='/System/Volumes/Data'):
+    def __init__(self, directory, targets=None, intervals=None, l1_path='/System/Volumes/Data',
+                 retention=None, incident_thresholds=None, notify=None):
         self.store = Store(directory)
         try:
             self.owner = lock(directory, 'monitor.lock')
@@ -155,6 +156,17 @@ class Monitor:
         self.active_id = None
         self.cancel_since = None
         self.stopping = False
+        from .retention import policy
+        from .incidents import thresholds
+        try:
+            self.retention = policy(retention)
+            self.incident_thresholds = thresholds(incident_thresholds)
+        except BaseException:
+            self.store.close()
+            os.close(self.owner)
+            raise
+        self.notify = notify or (lambda event: print(json.dumps(event), file=sys.stderr))
+        self.recording_error = None
 
     def reap(self):
         if not self.child:
@@ -213,6 +225,26 @@ class Monitor:
                 os.close(scan_fd)
 
     def tick(self, now=None):
+        try:
+            if self.recording_error is not None:
+                self.store.reconnect()
+                self.store.execute("INSERT OR REPLACE INTO meta VALUES('storage_probe',?)", (str(time.time()),))
+            self._tick(now)
+        except (OSError, sqlite3.Error) as exc:
+            if self.recording_error is None:
+                self.notify(dict(event='recording_stopped', error=str(exc)))
+                if self.child and self.child.poll() is None:
+                    self.child.terminate()
+            self.recording_error = str(exc)
+            raise
+        if self.recording_error is not None:
+            self.recording_error = None
+            self.notify(dict(event='recording_resumed'))
+
+    def _tick(self, now=None):
+        from .incidents import detect, advance
+        from .retention import maintain
+        self.store.check()
         self.reap()
         now = time.time() if now is None else now
         for layer, interval in self.intervals.items():
@@ -229,6 +261,12 @@ class Monitor:
                 ident = self.store.create_scan(layer, self.targets[layer], DEFAULT_OPTIONS, 'periodic', 'skipped' if busy else 'pending')
                 if busy:
                     self.store.execute('UPDATE scans SET ended=?,error=? WHERE id=?', (time.time(), 'another scan or request has priority', ident))
+        detect(self.store, self.targets, self.incident_thresholds)
+        advance(self.store, self.targets, self.incident_thresholds, self.notify)
+        due = self.store.rows("SELECT value FROM meta WHERE key='due_retention'")
+        if not due or now >= float(due[0]['value']):
+            maintain(self.store, now, self.retention)
+            self.store.execute("INSERT OR REPLACE INTO meta VALUES('due_retention',?)", (str(now+86400),))
         self.dispatch()
 
     def close(self):
