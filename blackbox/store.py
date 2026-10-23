@@ -41,13 +41,22 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 class Store:
-    def __init__(self, directory, *, create=False):
+    def __init__(self, directory, *, create=False, identity=None):
+        self.identity = identity
+        if identity is not None:
+            from .destination import verify
+            if Path(directory).absolute() != Path(identity["path"]):
+                raise ValueError("storage identity does not match directory")
+            verify(identity)
         self.directory = Path(directory).resolve(strict=True)
         if not self.directory.is_dir():
             raise ValueError('data directory must already exist')
         self.device = self.directory.stat().st_dev
         self.inode = self.directory.stat().st_ino
         database = self.directory / 'blackbox.sqlite3'
+        for suffix in ('-journal', '-wal', '-shm'):
+            if Path(str(database)+suffix).is_symlink():
+                raise OSError('SQLite sidecar must not be a symbolic link')
         if database.is_symlink():
             raise ValueError('database must not be a symbolic link')
         if create and database.exists():
@@ -63,15 +72,28 @@ class Store:
         self.db.commit()
 
     def check(self):
+        if self.identity is not None:
+            from .destination import verify
+            verify(self.identity, volume=False)
         st = self.directory.stat()
         if (st.st_dev, st.st_ino) != (self.device, self.inode):
             raise OSError('data destination changed; recording stopped')
         database = self.directory / 'blackbox.sqlite3'
+        for suffix in ('-journal', '-wal', '-shm'):
+            if Path(str(database)+suffix).is_symlink():
+                raise OSError('SQLite sidecar must not be a symbolic link')
         if database.is_symlink() or (database.stat().st_dev, database.stat().st_ino) != self.database_identity:
             raise OSError('database changed; recording stopped')
 
     def reconnect(self):
         # Preserve the original destination identity across failures. Never mkdir/init/fail over.
+        if self.identity is not None:
+            from .destination import verify
+            verify(self.identity)
+            # Device numbers may change on remount; stable volume/inodes must match.
+            self.device = self.directory.stat().st_dev
+            database = self.directory / 'blackbox.sqlite3'
+            self.database_identity = (database.stat().st_dev, database.stat().st_ino)
         self.check()
         self.db.close()
         self.db = sqlite3.connect((self.directory / 'blackbox.sqlite3').as_uri()+'?mode=rw', uri=True, timeout=5)

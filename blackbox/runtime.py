@@ -79,12 +79,12 @@ def observe(store, path):
         store.execute('INSERT INTO l1(time,path,error) VALUES(?,?,?)', (now, path, str(exc)))
 
 
-def worker(directory, ident, inherited_lock):
+def worker(directory, ident, inherited_lock, identity=None):
     # inherited flock survives supervisor death and prevents a second scan.
     started = time.monotonic()
     baseline = resource.getrusage(resource.RUSAGE_SELF)
     io_start = disk_io()
-    store = Store(directory)
+    store = Store(directory, identity=identity)
     scan = store.rows('SELECT * FROM scans WHERE id=?', (ident,))[0]
     interrupted = False
     def stop(signum, frame):
@@ -135,8 +135,8 @@ def worker(directory, ident, inherited_lock):
 
 class Monitor:
     def __init__(self, directory, targets=None, intervals=None, l1_path='/System/Volumes/Data',
-                 retention=None, incident_thresholds=None, notify=None):
-        self.store = Store(directory)
+                 retention=None, incident_thresholds=None, notify=None, identity=None):
+        self.store = Store(directory, identity=identity)
         try:
             self.owner = lock(directory, 'monitor.lock')
         except BaseException:
@@ -211,7 +211,7 @@ class Monitor:
                 self.store.db.execute("UPDATE scans SET state='running',started=? WHERE id=?", (time.time(), ident))
             self.active_id = ident
             try:
-                self.child = subprocess.Popen([sys.executable, '-m', 'blackbox', '_worker', str(self.store.directory), ident, str(scan_fd)],
+                self.child = subprocess.Popen([sys.executable, '-m', 'blackbox', '_worker', str(self.store.directory), ident, str(scan_fd), json.dumps(self.store.identity)],
                                                pass_fds=(scan_fd,), cwd=Path(__file__).resolve().parent.parent)
             except OSError as exc:
                 self.store.execute("UPDATE scans SET state='failed',ended=?,error=? WHERE id=?", (time.time(), str(exc), ident))

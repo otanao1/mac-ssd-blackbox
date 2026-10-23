@@ -197,4 +197,4 @@ MVPのCLIでは次を扱う。
 - #7: storage, retention, and Incident lifecycle
 - #8: CLI, configuration, daemon, and installation
 
-> 本書には#7・#8を含むMVP全体の設計方針を記す。実装済み範囲は[監視実行基盤](core-runtime.md)と[保存・Incident](storage-incidents.md)を参照。
+> 本書には#7・#8を含むMVP全体の設計方針を記す。実装済み範囲は[監視実行基盤](core-runtime.md)、[保存・Incident](storage-incidents.md)、[CLI・設定・運用](operations.md)を参照。
