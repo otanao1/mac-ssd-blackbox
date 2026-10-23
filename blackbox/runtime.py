@@ -14,6 +14,7 @@ import uuid
 
 from .scan import Cancelled, Scanner, normalize
 from .store import Store
+from .du import DuScanner
 from .metrics import disk_io
 from .diagnostics import emit as diagnostic
 
@@ -84,6 +85,7 @@ def worker(directory, ident, inherited_lock, identity=None):
     # inherited flock survives supervisor death and prevents a second scan.
     started = time.monotonic()
     baseline = resource.getrusage(resource.RUSAGE_SELF)
+    child_baseline = resource.getrusage(resource.RUSAGE_CHILDREN)
     io_start = disk_io()
     try:
         store = Store(directory, identity=identity)
@@ -105,7 +107,8 @@ def worker(directory, ident, inherited_lock, identity=None):
         store.execute('UPDATE scans SET current=? WHERE id=?', (path, ident))
     def emit(row):
         store.check()
-        store.db.execute('INSERT OR REPLACE INTO results VALUES(?,?,?,?,?,?,?,?,?)',
+        write = store.execute if scan['layer'] in ('L2', 'L3') else store.db.execute
+        write('INSERT OR REPLACE INTO results VALUES(?,?,?,?,?,?,?,?,?)',
                       (ident, row['path'], row['kind'], row.get('bytes'), row.get('logical'),
                        row['status'], row.get('error'), row.get('count'), row.get('mean_bytes')))
     state, error = 'succeeded', None
@@ -115,7 +118,8 @@ def worker(directory, ident, inherited_lock, identity=None):
             raise Cancelled()
         def target_done(n):
             store.execute('UPDATE scans SET completed=? WHERE id=?', (n, ident))
-        scanner = Scanner(store.db, progress, cancelled, target_done=target_done)
+        scanner_class = DuScanner if scan['layer'] in ('L2', 'L3') else Scanner
+        scanner = scanner_class(store.db, progress, cancelled, target_done=target_done)
         scanner.run(json.loads(scan['targets']), scan['layer'], json.loads(scan['options']), emit)
         if cancelled():
             raise Cancelled()
@@ -129,8 +133,11 @@ def worker(directory, ident, inherited_lock, identity=None):
     finally:
         usage = resource.getrusage(resource.RUSAGE_SELF)
         elapsed = time.monotonic()-started
-        cpu = usage.ru_utime+usage.ru_stime-baseline.ru_utime-baseline.ru_stime
-        metrics = dict(elapsed_seconds=elapsed, cpu_seconds=cpu,
+        child_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+        child_cpu = child_usage.ru_utime+child_usage.ru_stime-child_baseline.ru_utime-child_baseline.ru_stime
+        cpu = usage.ru_utime+usage.ru_stime-baseline.ru_utime-baseline.ru_stime+child_cpu
+        metrics = dict(elapsed_seconds=elapsed, cpu_seconds=cpu, child_cpu_seconds=child_cpu,
+                       child_peak_memory_bytes=child_usage.ru_maxrss if sys.platform == 'darwin' else child_usage.ru_maxrss*1024,
                        cpu_percent=100*cpu/max(elapsed, .001),
                        peak_memory_bytes=usage.ru_maxrss if sys.platform == 'darwin' else usage.ru_maxrss*1024,
                        input_operations=usage.ru_inblock, output_operations=usage.ru_oublock)

@@ -6,6 +6,10 @@ import sqlite3
 import time
 import uuid
 
+def scan_version(layer):
+    return 2 if layer in ('L2', 'L3') else 1
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS scans (
  id TEXT PRIMARY KEY, layer TEXT NOT NULL, trigger TEXT NOT NULL,
@@ -13,7 +17,7 @@ CREATE TABLE IF NOT EXISTS scans (
  created REAL NOT NULL, started REAL, ended REAL, pid INTEGER,
  current TEXT, completed INTEGER NOT NULL DEFAULT 0,
  total INTEGER NOT NULL DEFAULT 0, cancel INTEGER NOT NULL DEFAULT 0,
- error TEXT, metrics TEXT);
+ error TEXT, metrics TEXT, scan_version INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX IF NOT EXISTS scan_state_created ON scans(state,created);
 CREATE INDEX IF NOT EXISTS scan_layer_started ON scans(layer,started);
 CREATE TABLE IF NOT EXISTS results (
@@ -68,8 +72,11 @@ class Store:
         self.database_identity = (database.stat().st_dev, database.stat().st_ino)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA foreign_keys=ON')
-        self.db.executescript(SCHEMA)
-        self.db.commit()
+        # Only explicit creation initializes schema. Existing DBs are opened as-is;
+        # schema changes belong to the separately approved operational cutover.
+        if create:
+            self.db.executescript(SCHEMA)
+            self.db.commit()
 
     def check(self):
         if self.identity is not None:
@@ -112,8 +119,8 @@ class Store:
 
     def create_scan(self, layer, targets, options, trigger='manual', state='pending'):
         ident = uuid.uuid4().hex
-        self.execute('INSERT INTO scans(id,layer,trigger,targets,options,state,created,total) VALUES(?,?,?,?,?,?,?,?)',
-                     (ident, layer, trigger, json.dumps(targets), json.dumps(options), state, time.time(), len(targets)))
+        self.execute('INSERT INTO scans(id,layer,trigger,targets,options,state,created,total,scan_version) VALUES(?,?,?,?,?,?,?,?,?)',
+                     (ident, layer, trigger, json.dumps(targets), json.dumps(options), state, time.time(), len(targets), scan_version(layer)))
         return ident
 
     def close(self):

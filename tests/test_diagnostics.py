@@ -109,7 +109,7 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
     @patch('blackbox.runtime.diagnostic')
     @patch('blackbox.runtime.os.close')
     @patch('blackbox.runtime.disk_io', return_value=None)
-    @patch('blackbox.runtime.Scanner')
+    @patch('blackbox.runtime.DuScanner')
     @patch('blackbox.runtime.Store')
     @patch('blackbox.runtime.signal.signal')
     def test_worker_signal_and_user_cancel_distinguished(self, signals, store, scanner, io, close, log):
@@ -149,7 +149,7 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
     @patch('blackbox.runtime.diagnostic')
     @patch('blackbox.runtime.os.close')
     @patch('blackbox.runtime.disk_io', return_value=None)
-    @patch('blackbox.runtime.Scanner')
+    @patch('blackbox.runtime.DuScanner')
     @patch('blackbox.runtime.Store')
     @patch('blackbox.runtime.signal.signal')
     def test_worker_finalize_failure_is_logged_even_when_db_unwritable(self, signals, store, scanner, io, close, log):
