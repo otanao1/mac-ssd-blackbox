@@ -2,7 +2,7 @@
 
 Issue #1・#2・#3・#6・#7と[監視設計](monitoring-design.md)に基づく。
 Python 3.11以上・標準ライブラリ・既存SQLiteを使用する。Scanの走査・排他・待機構造は維持する。
-正式CLI、設定の配布/reload、launchd、インストーラー、起動時の永続的な保存先識別は#8の対象。
+正式CLI、設定の配布/reload、launchd、インストーラー、起動時の永続的な保存先識別は[#8の運用手順](operations.md)を参照。
 
 ## 保存形式と保持
 
@@ -145,7 +145,7 @@ Incident全体の`evaluation`にも全体理由・対象別理由の一覧・確
 生履歴全体を複製しない。scan IDは通常履歴削除後も証跡の出自として残り、
 評価値・抜粋はIncident行だけで参照できる。
 
-#8から利用するPython API（正式CLIは未実装）：
+#8のCLIからも利用するPython API：
 
 ```python
 from blackbox.store import Store
@@ -189,8 +189,9 @@ Monitorの`notify(event)`へ`recording_stopped`を一度通知し、復旧を再
 `recording_error`で停止理由を確認できる。デフォルト通知先はstderrのJSON。
 調査終了も`incident_completed`として通知する。
 
-初回外部SSD/NAS検証、プロセス再起動をまたぐ永続的マウント識別、正式な通知連携、
-SQLite TEMP保存先の運用設定は#8に維持する（[既存の引き継ぎ](https://github.com/otanao1/mac-ssd-blackbox/issues/8#issuecomment-6354212132)）。
+初回保存先検証と再起動をまたぐマウント識別は[#8](operations.md)で追加した。
+通知は既存JSONイベントとCLI状態表示を利用する。SQLite TEMPの内蔵SSD書き込みは許容し、外付け配置を必須としない。
+測定用のtemp_store_directory設定は製品へ導入しない（[元の引き継ぎ](https://github.com/otanao1/mac-ssd-blackbox/issues/8#issuecomment-6354212132)）。
 今回の保存先置換/書き込み不可/復旧検証は合成ディレクトリと注入エラーによるもので、実SSD/NASの切断試験は行わない。
 
 ## 検証

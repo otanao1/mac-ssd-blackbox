@@ -4,7 +4,7 @@
 
 mac-ssd-blackbox is an open-source project to help investigate unexplained drops in free space on a Mac's internal SSD. It aims to collect lightweight, continuous observations and preserve useful evidence when abnormal storage consumption occurs.
 
-> **Status: Monitoring, retention, and Incident core / pre-MVP.** L1 collection, the shared L2/L3/L9 execution core, history retention, and Incident investigation are available through a development harness and Python APIs. Installation, launchd integration, and the supported CLI remain planned. See [core runtime](docs/core-runtime.md) and [storage and Incident lifecycle](docs/storage-incidents.md).
+> **Status: MVP implementation / real launchd validation pending.** Monitoring, retention, Incident investigation, CLI, configuration, and setup/removal are implemented. See [operations](docs/operations.md) for installation and commands, [core runtime](docs/core-runtime.md), and [storage lifecycle](docs/storage-incidents.md). No live launchd registration, login/reboot, or physical SSD/NAS disconnect test has been performed for Issue #8.
 
 ## Why?
 
@@ -66,7 +66,7 @@ The MVP will **not** delete files automatically, terminate processes, perform au
 - [Issue #1 — Define MVP scope and acceptance criteria](https://github.com/otanao1/mac-ssd-blackbox/issues/1)
 - [Issue #6 — Implement core monitoring and scan execution](https://github.com/otanao1/mac-ssd-blackbox/issues/6)
 - [Issue #7 — Implement storage, retention, and Incident lifecycle](https://github.com/otanao1/mac-ssd-blackbox/issues/7)
-- [Issue #8 — Implement CLI, configuration, daemon, and installation](https://github.com/otanao1/mac-ssd-blackbox/issues/8)
+- [Issue #8 — CLI, configuration, daemon, and installation](https://github.com/otanao1/mac-ssd-blackbox/issues/8) — [implementation and operations](docs/operations.md)
 - Validate MVP behavior and resource usage on a real Mac
 - Document installation, configuration, and removal before a public release
 

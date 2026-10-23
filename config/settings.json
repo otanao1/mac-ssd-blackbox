@@ -1,0 +1,13 @@
+{
+  "intervals": {"L1": 60, "L2": 86400, "L3": 3600},
+  "l1_path": "/System/Volumes/Data",
+  "targets": {"L2": [], "L3": []},
+  "retention": {
+    "l1_years": 3, "l2_years": 3, "l3_years": 3, "l9_years": 3,
+    "incident_years": 3, "l3_raw_days": 30, "l3_bucket_seconds": 86400
+  },
+  "incident_thresholds": {
+    "drop_minute": 1073741824, "drop_day": 5368709120,
+    "low_space": 5368709120, "l9_cooldown": 1800
+  }
+}
