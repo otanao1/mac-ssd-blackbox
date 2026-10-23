@@ -200,32 +200,67 @@ class VersionTest(unittest.TestCase):
         step=dict(scan_id=current,baseline_id=old);obj=dict(detection={'threshold':1})
         self.assertTrue(_evaluate(self.s,obj,step));self.assertEqual(step['compared_count'],0);self.assertIsNone(step['baseline_id'])
 
-    def test_migration_rolls_back_on_destination_failure(self):
-        old=self.s.create_scan('L2',[],{})
-        self.s.execute('UPDATE scans SET scan_version=1 WHERE id=?',(old,))
-        self.s.execute("DELETE FROM meta WHERE key='du_scan_migration_v2'")
-        with patch.object(self.s,'check',side_effect=[None,OSError('destination lost')]):
-            with self.assertRaises(OSError):self.s._migrate_scans()
-        self.assertTrue(self.s.rows('SELECT id FROM scans WHERE id=?',(old,)))
-        self.assertFalse(self.s.rows("SELECT 1 FROM meta WHERE key='du_scan_migration_v2'"))
-
-    def test_old_schema_migration_preserves_l1_incidents_l9_and_new_scans(self):
+    def old_schema_fixture(self):
         self.s.close()
         c=sqlite3.connect(self.path/'blackbox.sqlite3')
-        c.execute("DELETE FROM meta WHERE key='du_scan_migration_v2'")
         c.execute('ALTER TABLE scans DROP COLUMN scan_version')
         for layer in ('L2','L3','L9'):
-            c.execute('INSERT INTO scans(id,layer,trigger,targets,options,state,created) VALUES(?,?,?,?,?,?,?)',(layer,layer,'manual','[]','{}','succeeded',1))
+            c.execute('INSERT INTO scans(id,layer,trigger,targets,options,state,created) VALUES(?,?,?,?,?,?,?)',
+                      (layer,layer,'manual','[]','{}','pending' if layer=='L2' else 'succeeded',1))
             c.execute('INSERT INTO results VALUES(?,?,?,?,?,?,?,?,?)',(layer,'/synthetic','directory',1,1,'ok',None,None,None))
         c.execute("INSERT INTO l1(time,path) VALUES(1,'/synthetic')")
         c.execute('INSERT INTO l3_daily VALUES(?,?,?,?,?)',(1,1,'/synthetic','directory','{}'))
-        c.execute('INSERT INTO incidents VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',('incident',1,'DROP_SPACE','investigating','{}','{}','[]','[]','keep','["L2"]','L2',1))
-        c.commit();c.close()
+        c.execute('INSERT INTO incidents VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                  ('incident',1,'DROP_SPACE','investigating','{}','{}','[]','[]','keep','["L2"]','L2',1))
+        c.execute("INSERT INTO meta VALUES('due_L2','12345')")
+        c.commit()
+        snapshot={table:c.execute('SELECT * FROM '+table).fetchall()
+                  for table in ('results','l1','l3_daily','incidents','meta')}
+        snapshot['scans']=c.execute('SELECT * FROM scans').fetchall()
+        c.close()
+        return snapshot
+
+    def assert_history_preserved(self, snapshot):
+        c=sqlite3.connect(self.path/'blackbox.sqlite3')
+        try:
+            for table,rows in snapshot.items():
+                if table=='scans':
+                    columns=[r[1] for r in c.execute('PRAGMA table_info(scans)') if r[1]!='scan_version']
+                    actual=c.execute('SELECT '+','.join(columns)+' FROM scans').fetchall()
+                else:actual=c.execute('SELECT * FROM '+table).fetchall()
+                self.assertEqual(actual,rows,table)
+        finally:c.close()
+
+    def test_old_schema_open_and_reference_commands_preserve_all_history(self):
+        import sys
+        snapshot=self.old_schema_fixture()
         self.s=Store(self.path);self.addCleanup(self.s.close)
-        self.assertEqual([r['layer'] for r in self.s.rows('SELECT layer FROM scans')],['L9'])
-        self.assertEqual(len(self.s.rows('SELECT * FROM l1')),1)
-        self.assertEqual(self.s.rows('SELECT state,notes FROM incidents')[0],dict(state='unidentified',notes='keep'))
-        self.assertFalse(self.s.rows('SELECT * FROM l3_daily'))
-        new=self.s.create_scan('L2',[],{});self.s.close();self.s=Store(self.path);self.addCleanup(self.s.close)
-        self.assertTrue(self.s.rows('SELECT id FROM scans WHERE id=?',(new,)))
+        self.assertEqual([r['scan_version'] for r in self.s.rows('SELECT scan_version FROM scans')],[1,1,1])
+        self.assert_history_preserved(snapshot)
+        for args in (['history'],['status'],['results','L2'],['incidents']):
+            result=subprocess.run([sys.executable,'-B','-m','blackbox','--data',str(self.path),*args],
+                                  check=True,capture_output=True,text=True,timeout=10)
+            json.loads(result.stdout)
+            self.assert_history_preserved(snapshot)
+        self.assertFalse(self.s.rows("SELECT * FROM meta WHERE key LIKE '%migration%'"))
+        self.assertFalse(hasattr(self.s,'_migrate_scans'))
+        ident=self.s.create_scan('L2',[],{})
+        self.assertEqual(self.s.rows('SELECT scan_version FROM scans WHERE id=?',(ident,))[0]['scan_version'],2)
         self.assertEqual(self.s.db.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+
+    def test_schema_addition_is_idempotent_without_history_changes(self):
+        snapshot=self.old_schema_fixture()
+        for _ in range(2):
+            store=Store(self.path);store.close()
+            self.assert_history_preserved(snapshot)
+
+    def test_schema_addition_rolls_back_on_destination_failure(self):
+        self.old_schema_fixture()
+        raw=sqlite3.connect(self.path/'blackbox.sqlite3');raw.row_factory=sqlite3.Row
+        obj=Store.__new__(Store);obj.db=raw
+        try:
+            with patch.object(obj,'check',side_effect=[None,OSError('destination lost')]):
+                with self.assertRaises(OSError):obj._ensure_scan_version()
+            self.assertNotIn('scan_version',{r[1] for r in raw.execute('PRAGMA table_info(scans)')})
+            self.assertEqual(raw.execute('SELECT COUNT(*) FROM scans').fetchone()[0],3)
+        finally:raw.close()

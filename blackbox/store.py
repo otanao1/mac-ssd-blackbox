@@ -75,36 +75,21 @@ class Store:
         self.db.executescript(SCHEMA)
         self.db.commit()
         try:
-            self._migrate_scans()
+            self._ensure_scan_version()
         except BaseException:
             self.db.close()
             raise
 
-    def _migrate_scans(self):
-        """One atomic transition; callers must stop the old runtime before upgrading."""
-        self.check()
-        columns = {r[1] for r in self.db.execute("PRAGMA table_info(scans)")}
-        if "scan_version" in columns and self.db.execute("SELECT 1 FROM meta WHERE key='du_scan_migration_v2'").fetchone():
+    def _ensure_scan_version(self):
+        """Only add version metadata; never delete history on opening a DB."""
+        if "scan_version" in {r[1] for r in self.db.execute("PRAGMA table_info(scans)")}:
             return
+        self.check()
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
+            # Another process may have added the column while we waited.
             if "scan_version" not in {r[1] for r in self.db.execute("PRAGMA table_info(scans)")}:
                 self.db.execute("ALTER TABLE scans ADD COLUMN scan_version INTEGER NOT NULL DEFAULT 1")
-            if self.db.execute("SELECT 1 FROM meta WHERE key='du_scan_migration_v2'").fetchone():
-                return
-            affected = self.db.execute("""SELECT DISTINCT i.* FROM incidents i
-                JOIN json_each(i.scan_ids) j JOIN scans s ON s.id=j.value
-                WHERE i.state='investigating' AND s.layer IN ('L2','L3') AND s.scan_version<2""").fetchall()
-            for raw in affected:
-                evaluation = json.loads(raw["evaluation"])
-                evaluation.update(reason="scan_version_migration", conclusion="Old capacity history removed; investigation requires a new baseline")
-                self.db.execute("UPDATE incidents SET state='unidentified',stage='done',evaluation=?,updated=? WHERE id=?",
-                                (json.dumps(evaluation), time.time(), raw["id"]))
-            self.db.execute("DELETE FROM results WHERE scan_id IN (SELECT id FROM scans WHERE layer IN ('L2','L3') AND scan_version<2)")
-            self.db.execute("DELETE FROM scans WHERE layer IN ('L2','L3') AND scan_version<2")
-            self.db.execute("DELETE FROM l3_daily")
-            self.db.execute("DELETE FROM meta WHERE key IN ('due_L2','due_L3')")
-            self.db.execute("INSERT INTO meta VALUES('du_scan_migration_v2',?)", (str(time.time()),))
             self.check()
 
     def check(self):
