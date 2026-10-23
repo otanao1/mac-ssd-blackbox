@@ -4,7 +4,7 @@
 
 mac-ssd-blackbox is an open-source project to help investigate unexplained drops in free space on a Mac's internal SSD. It aims to collect lightweight, continuous observations and preserve useful evidence when abnormal storage consumption occurs.
 
-> **Status: Planning / pre-MVP.** The monitoring agent and CLI described below are design goals, not yet implemented features.
+> **Status: Core monitoring implementation / pre-MVP.** L1 collection and the shared L2/L3/L9 execution core are available through a development harness. Incident handling, retention, installation, launchd integration, and the supported CLI remain planned. See [core runtime and verification](docs/core-runtime.md).
 
 ## Why?
 
