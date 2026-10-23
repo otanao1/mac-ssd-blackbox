@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from xml.parsers.expat import ExpatError
 
 from .configuration import DEFAULT_PRIVATE
@@ -148,6 +149,8 @@ def stop_owned_job(target, expected, agent):
         # atomic compare-and-bootout operation; do not change this label concurrently.
         if owned_job(target, expected, agent):
             launchctl('bootout', target)
+            return True
+    return False
 
 
 def install(source, directory, mount, *, private=DEFAULT_PRIVATE, runtime=DEFAULT_RUNTIME,
@@ -208,6 +211,21 @@ def install(source, directory, mount, *, private=DEFAULT_PRIVATE, runtime=DEFAUL
     return dict(installed=True, **manifest, configuration=str(private))
 
 
+def acquire_stopped_service(private, wait):
+    """Hold the existing lifecycle lock through deletion; never stop a foreground run."""
+    from .runtime import lock
+    deadline = time.monotonic()+15
+    while True:
+        try:
+            return lock(private, 'service.lock')
+        except BlockingIOError:
+            if not wait:
+                raise ValueError('foreground service is still running; stop it before uninstall')
+            if time.monotonic() >= deadline:
+                raise ValueError('timed out waiting for service cleanup; no files removed')
+            time.sleep(.1)
+
+
 def uninstall(private, *, remove_configuration=False):
     private = Path(private).expanduser().absolute()
     manifest = json.loads((private/'installation.json').read_text())
@@ -219,20 +237,27 @@ def uninstall(private, *, remove_configuration=False):
         if path.is_relative_to(runtime) or runtime.is_relative_to(path):
             raise ValueError('runtime overlaps protected configuration/data')
     expected = uninstall_job(private, manifest)
-    stop_owned_job(domain()+'/'+LABEL, expected, agent)
-    from .service import call
+    stopped = stop_owned_job(domain()+'/'+LABEL, expected, agent)
+    # bootout can return before the service finishes closing children/DB/socket.
+    # service.run releases this lock only after all of that cleanup. A successful
+    # owned bootout permits a bounded wait; an unrelated foreground run does not.
+    owner = acquire_stopped_service(private, wait=stopped)
     try:
-        call(private, 'status')
-    except (FileNotFoundError, ConnectionRefusedError):
-        pass
-    else:
-        raise ValueError('foreground service is still running; stop it before uninstall')
-    if manifest['registered']:
-        # Another install may have replaced the shared file after bootout.
-        verify_agent(agent, expected)
-        agent.unlink(missing_ok=True)
-    cli.unlink(missing_ok=True)
-    shutil.rmtree(runtime)
-    if remove_configuration:
-        shutil.rmtree(private)
-    return dict(uninstalled=True, data_preserved=manifest['data'], configuration_removed=remove_configuration)
+        from .service import call
+        try:
+            call(private, 'status')
+        except (FileNotFoundError, ConnectionRefusedError):
+            pass
+        else:
+            raise ValueError('foreground service is still running; stop it before uninstall')
+        if manifest['registered']:
+            # Another install may have replaced the shared file after bootout.
+            verify_agent(agent, expected)
+            agent.unlink(missing_ok=True)
+        cli.unlink(missing_ok=True)
+        shutil.rmtree(runtime)
+        if remove_configuration:
+            shutil.rmtree(private)
+        return dict(uninstalled=True, data_preserved=manifest['data'], configuration_removed=remove_configuration)
+    finally:
+        os.close(owner)

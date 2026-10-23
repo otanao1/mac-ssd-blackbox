@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from blackbox.installation import LABEL, domain, plist_bytes, uninstall
+from blackbox.runtime import lock
 
 
 def description(private, runtime, agent):
@@ -240,6 +241,82 @@ class UninstallTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'plist path'):
             uninstall(self.b['private'])
         self.launch.assert_not_called()
+
+    def test_bootout_waits_for_service_cleanup(self):
+        registered = self.installation('registered', registered=True)
+        state = dict(fd=lock(registered['private'], 'service.lock'), closing=True)
+        def release():
+            if state['fd'] is not None:
+                os.close(state['fd'])
+                state['fd'] = None
+        self.addCleanup(release)
+        self.launch.return_value = self.loaded(registered)
+        def status(*args):
+            # Reproduce the observed race: the service can still answer after
+            # bootout returns, while its final cleanup retains service.lock.
+            if state['closing']:
+                return dict(running=True)
+            raise FileNotFoundError('control socket removed after cleanup')
+        def finish_shutdown(seconds):
+            self.assert_preserved(registered)
+            state['closing'] = False
+            release()
+        with patch('time.sleep', side_effect=finish_shutdown) as sleep, \
+             patch('blackbox.service.call', side_effect=status):
+            result = uninstall(registered['private'])
+        self.assertTrue(result['uninstalled'])
+        sleep.assert_called_once()
+        self.assertEqual(self.launch.call_args.args[0], 'bootout')
+        self.assertFalse(registered['runtime'].exists())
+        self.assertFalse(registered['agent'].exists())
+        self.assertTrue(registered['data'].exists())
+
+    def test_shutdown_timeout_preserves_every_file(self):
+        fd = lock(self.b['private'], 'service.lock')
+        self.addCleanup(os.close, fd)
+        self.launch.return_value = self.loaded(self.b)
+        with patch('time.monotonic', side_effect=[0, 15]), \
+             patch('time.sleep') as sleep, patch('blackbox.service.call') as call:
+            with self.assertRaisesRegex(ValueError, 'timed out'):
+                uninstall(self.b['private'], remove_configuration=True)
+        sleep.assert_not_called()
+        call.assert_not_called()
+        self.assert_preserved(self.b)
+        self.assertEqual(self.launch.call_args.args[0], 'bootout')
+
+    def test_foreground_lock_without_owned_bootout_is_not_waited_or_stopped(self):
+        fd = lock(self.b['private'], 'service.lock')
+        self.addCleanup(os.close, fd)
+        with patch('time.sleep') as sleep, patch('blackbox.service.call') as call:
+            with self.assertRaisesRegex(ValueError, 'foreground service'):
+                uninstall(self.b['private'])
+        sleep.assert_not_called()
+        call.assert_not_called()
+        self.assert_no_mutation()
+        self.assert_preserved(self.b)
+
+    def test_service_lock_is_held_during_file_deletion(self):
+        import shutil
+        remove = shutil.rmtree
+        def checked_remove(path):
+            with self.assertRaises(BlockingIOError):
+                lock(self.b['private'], 'service.lock')
+            remove(path)
+        with patch('blackbox.installation.shutil.rmtree', side_effect=checked_remove):
+            uninstall(self.b['private'])
+        fd = lock(self.b['private'], 'service.lock')
+        os.close(fd)
+        self.assertTrue(self.b['data'].exists())
+
+    def test_socket_error_releases_lock_without_deleting(self):
+        for error in (OSError('control unavailable'), None):
+            with self.subTest(error=error):
+                with patch('blackbox.service.call', side_effect=error, return_value=dict(running=True)):
+                    with self.assertRaises(OSError if error else ValueError):
+                        uninstall(self.b['private'])
+                fd = lock(self.b['private'], 'service.lock')
+                os.close(fd)
+                self.assert_preserved(self.b)
 
 
 if __name__ == '__main__':
