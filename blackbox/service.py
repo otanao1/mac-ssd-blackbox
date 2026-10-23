@@ -8,6 +8,7 @@ import sqlite3
 import time
 
 from .configuration import load
+from .diagnostics import emit as diagnostic, available as diagnostic_available
 from .runtime import Monitor, lock, request
 
 
@@ -67,6 +68,7 @@ class Service:
     def tick(self):
         if time.monotonic() < self.retry:
             return
+        initializing = self.monitor is None
         try:
             if self.monitor is None:
                 cfg = self.config
@@ -74,10 +76,14 @@ class Service:
                                        retention=cfg['retention'], incident_thresholds=cfg['incident_thresholds'],
                                        identity=cfg['storage'])
             self.monitor.tick()
+            if initializing and self.error is not None:
+                diagnostic('service_initialized')
             if self.error is not None:
                 print(json.dumps(dict(event='service_recording_resumed')), flush=True)
             self.error = None
         except (OSError, sqlite3.Error, ValueError) as exc:
+            if self.error is None and initializing:
+                diagnostic('service_initialization_failed', error=exc, stage='initialize')
             if self.error is None:
                 print(json.dumps(dict(event='service_recording_stopped', error=str(exc))), flush=True)
             self.error = str(exc)
@@ -95,7 +101,8 @@ class Service:
                         storage_identity=self.config['storage'])
         if command == 'status':
             output = dict(running=True, pid=os.getpid(), started=self.started,
-                          recording_error=self.error, sources=self.config['sources'], scans=[], waiting=[])
+                          recording_error=self.error, sources=self.config['sources'], scans=[], waiting=[],
+                          diagnostic_logging=diagnostic_available())
             if self.monitor:
                 output['recording_error'] = self.error or self.monitor.recording_error
                 try:

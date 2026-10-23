@@ -15,6 +15,7 @@ import uuid
 from .scan import Cancelled, Scanner, normalize
 from .store import Store
 from .metrics import disk_io
+from .diagnostics import emit as diagnostic
 
 DEFAULT_INTERVALS = {'L1': 60, 'L2': 86400, 'L3': 3600}
 DEFAULT_OPTIONS = {'threshold': 1024**3, 'max_depth': 7}
@@ -84,12 +85,18 @@ def worker(directory, ident, inherited_lock, identity=None):
     started = time.monotonic()
     baseline = resource.getrusage(resource.RUSAGE_SELF)
     io_start = disk_io()
-    store = Store(directory, identity=identity)
-    scan = store.rows('SELECT * FROM scans WHERE id=?', (ident,))[0]
+    try:
+        store = Store(directory, identity=identity)
+        scan = store.rows('SELECT * FROM scans WHERE id=?', (ident,))[0]
+    except Exception as exc:
+        diagnostic('worker_start_failed', error=exc, scan_id=ident, stage='initialize')
+        raise
     interrupted = False
+    received_signal = None
     def stop(signum, frame):
-        nonlocal interrupted
+        nonlocal interrupted, received_signal
         interrupted = True
+        received_signal = signum
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     def cancelled():
@@ -102,6 +109,7 @@ def worker(directory, ident, inherited_lock, identity=None):
                       (ident, row['path'], row['kind'], row.get('bytes'), row.get('logical'),
                        row['status'], row.get('error'), row.get('count'), row.get('mean_bytes')))
     state, error = 'succeeded', None
+    failure = None
     try:
         if cancelled():
             raise Cancelled()
@@ -116,6 +124,7 @@ def worker(directory, ident, inherited_lock, identity=None):
     except Cancelled:
         state = 'cancelled'
     except BaseException as exc:
+        failure = exc
         state, error = 'failed', str(exc)
     finally:
         usage = resource.getrusage(resource.RUSAGE_SELF)
@@ -127,10 +136,19 @@ def worker(directory, ident, inherited_lock, identity=None):
                        input_operations=usage.ru_inblock, output_operations=usage.ru_oublock)
         io_end = disk_io()
         metrics.update({k: io_end[k]-io_start[k] for k in io_end} if io_start is not None and io_end is not None else {'disk_read_bytes': None, 'disk_written_bytes': None})
-        store.execute('UPDATE scans SET state=?,ended=?,error=?,metrics=?,completed=CASE WHEN ? IN (\'succeeded\',\'partial\') THEN total ELSE completed END WHERE id=?',
-                      (state, time.time(), error, json.dumps(metrics), state, ident))
-        store.close()
-        os.close(inherited_lock)
+        try:
+            store.execute('UPDATE scans SET state=?,ended=?,error=?,metrics=?,completed=CASE WHEN ? IN (\'succeeded\',\'partial\') THEN total ELSE completed END WHERE id=?',
+                          (state, time.time(), error, json.dumps(metrics), state, ident))
+        except BaseException as exc:
+            diagnostic('worker_finalize_failed', error=exc, scan_id=ident, stage='finalize')
+            raise
+        finally:
+            store.close()
+            os.close(inherited_lock)
+        if state in ('cancelled', 'failed', 'partial'):
+            reason = ('signal' if received_signal else 'user_cancel') if state == 'cancelled' else ('worker_error' if state == 'failed' else 'incomplete')
+            diagnostic('worker_finished', error=failure, scan_id=ident, state=state,
+                       reason=reason, signal=received_signal)
 
 
 class Monitor:
@@ -178,7 +196,9 @@ class Monitor:
             if self.child.poll() is None and elapsed > 5:
                 self.child.terminate() if elapsed < 10 else self.child.kill()
         if self.child.poll() is not None:
-            self.store.execute("UPDATE scans SET state=CASE WHEN cancel=1 THEN 'cancelled' ELSE 'failed' END,ended=?,error='worker exited before finalizing' WHERE id=? AND state='running'", (time.time(), self.active_id))
+            updated = self.store.execute("UPDATE scans SET state=CASE WHEN cancel=1 THEN 'cancelled' ELSE 'failed' END,ended=?,error='worker exited before finalizing' WHERE id=? AND state='running'", (time.time(), self.active_id))
+            if updated.rowcount:
+                diagnostic('worker_unexpected_exit', scan_id=self.active_id, child_pid=self.child.pid, returncode=self.child.returncode)
             os.close(self.scan_lock)
             self.scan_lock = self.child = self.active_id = self.cancel_since = None
 
@@ -225,6 +245,7 @@ class Monitor:
                 os.close(scan_fd)
 
     def tick(self, now=None):
+        stage = 'reconnect' if self.recording_error is not None else 'tick'
         try:
             if self.recording_error is not None:
                 self.store.reconnect()
@@ -232,13 +253,20 @@ class Monitor:
             self._tick(now)
         except (OSError, sqlite3.Error) as exc:
             if self.recording_error is None:
+                diagnostic('recording_suspended', error=exc, scan_id=self.active_id, stage=stage)
                 self.notify(dict(event='recording_stopped', error=str(exc)))
                 if self.child and self.child.poll() is None:
-                    self.child.terminate()
+                    diagnostic('worker_interrupt_requested', scan_id=self.active_id, child_pid=self.child.pid, reason='recording_error', signal=signal.SIGTERM.value)
+                    try:
+                        self.child.terminate()
+                    except OSError as termination_error:
+                        diagnostic('worker_interrupt_failed', error=termination_error, scan_id=self.active_id, child_pid=self.child.pid, reason='recording_error')
+                        raise
             self.recording_error = str(exc)
             raise
         if self.recording_error is not None:
             self.recording_error = None
+            diagnostic('recording_resumed')
             self.notify(dict(event='recording_resumed'))
 
     def _tick(self, now=None):
