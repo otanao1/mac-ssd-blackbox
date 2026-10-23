@@ -72,25 +72,11 @@ class Store:
         self.database_identity = (database.stat().st_dev, database.stat().st_ino)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA foreign_keys=ON')
-        self.db.executescript(SCHEMA)
-        self.db.commit()
-        try:
-            self._ensure_scan_version()
-        except BaseException:
-            self.db.close()
-            raise
-
-    def _ensure_scan_version(self):
-        """Only add version metadata; never delete history on opening a DB."""
-        if "scan_version" in {r[1] for r in self.db.execute("PRAGMA table_info(scans)")}:
-            return
-        self.check()
-        with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
-            # Another process may have added the column while we waited.
-            if "scan_version" not in {r[1] for r in self.db.execute("PRAGMA table_info(scans)")}:
-                self.db.execute("ALTER TABLE scans ADD COLUMN scan_version INTEGER NOT NULL DEFAULT 1")
-            self.check()
+        # Only explicit creation initializes schema. Existing DBs are opened as-is;
+        # schema changes belong to the separately approved operational cutover.
+        if create:
+            self.db.executescript(SCHEMA)
+            self.db.commit()
 
     def check(self):
         if self.identity is not None:

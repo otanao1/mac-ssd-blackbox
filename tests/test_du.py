@@ -204,6 +204,7 @@ class VersionTest(unittest.TestCase):
         self.s.close()
         c=sqlite3.connect(self.path/'blackbox.sqlite3')
         c.execute('ALTER TABLE scans DROP COLUMN scan_version')
+        c.execute('DROP INDEX scan_layer_started')
         for layer in ('L2','L3','L9'):
             c.execute('INSERT INTO scans(id,layer,trigger,targets,options,state,created) VALUES(?,?,?,?,?,?,?)',
                       (layer,layer,'manual','[]','{}','pending' if layer=='L2' else 'succeeded',1))
@@ -217,6 +218,7 @@ class VersionTest(unittest.TestCase):
         snapshot={table:c.execute('SELECT * FROM '+table).fetchall()
                   for table in ('results','l1','l3_daily','incidents','meta')}
         snapshot['scans']=c.execute('SELECT * FROM scans').fetchall()
+        snapshot['sqlite_master']=c.execute('SELECT * FROM sqlite_master').fetchall()
         c.close()
         return snapshot
 
@@ -235,7 +237,7 @@ class VersionTest(unittest.TestCase):
         import sys
         snapshot=self.old_schema_fixture()
         self.s=Store(self.path);self.addCleanup(self.s.close)
-        self.assertEqual([r['scan_version'] for r in self.s.rows('SELECT scan_version FROM scans')],[1,1,1])
+        self.assertNotIn('scan_version',{r[1] for r in self.s.db.execute('PRAGMA table_info(scans)')})
         self.assert_history_preserved(snapshot)
         for args in (['history'],['status'],['results','L2'],['incidents']):
             result=subprocess.run([sys.executable,'-B','-m','blackbox','--data',str(self.path),*args],
@@ -244,23 +246,32 @@ class VersionTest(unittest.TestCase):
             self.assert_history_preserved(snapshot)
         self.assertFalse(self.s.rows("SELECT * FROM meta WHERE key LIKE '%migration%'"))
         self.assertFalse(hasattr(self.s,'_migrate_scans'))
+        self.assertFalse(hasattr(self.s,'_ensure_scan_version'))
+        self.assertEqual(self.s.db.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+
+    def test_existing_schema_reopen_and_reconnect_do_not_modify_schema_or_history(self):
+        from blackbox.runtime import Monitor
+        snapshot=self.old_schema_fixture()
+        monitor=Monitor(self.path);monitor.close()
+        self.assert_history_preserved(snapshot)
+        for _ in range(2):
+            store=Store(self.path);store.reconnect();store.close()
+            self.assert_history_preserved(snapshot)
+
+    def test_explicit_operational_cutover_on_isolated_database(self):
+        snapshot=self.old_schema_fixture()
+        c=sqlite3.connect(self.path/'blackbox.sqlite3')
+        try:
+            with c:
+                c.execute('ALTER TABLE scans ADD COLUMN scan_version INTEGER NOT NULL DEFAULT 1')
+                c.execute("DELETE FROM results WHERE scan_id IN (SELECT id FROM scans WHERE layer IN ('L2','L3') AND scan_version=1)")
+                c.execute("DELETE FROM scans WHERE layer IN ('L2','L3') AND scan_version=1")
+                c.execute('DELETE FROM l3_daily')
+            for table in ('l1','incidents','meta'):
+                self.assertEqual(c.execute('SELECT * FROM '+table).fetchall(),snapshot[table])
+            self.assertEqual(c.execute('SELECT layer,scan_version FROM scans').fetchall(),[('L9',1)])
+        finally:c.close()
+        self.s=Store(self.path);self.addCleanup(self.s.close)
         ident=self.s.create_scan('L2',[],{})
         self.assertEqual(self.s.rows('SELECT scan_version FROM scans WHERE id=?',(ident,))[0]['scan_version'],2)
         self.assertEqual(self.s.db.execute('PRAGMA integrity_check').fetchone()[0],'ok')
-
-    def test_schema_addition_is_idempotent_without_history_changes(self):
-        snapshot=self.old_schema_fixture()
-        for _ in range(2):
-            store=Store(self.path);store.close()
-            self.assert_history_preserved(snapshot)
-
-    def test_schema_addition_rolls_back_on_destination_failure(self):
-        self.old_schema_fixture()
-        raw=sqlite3.connect(self.path/'blackbox.sqlite3');raw.row_factory=sqlite3.Row
-        obj=Store.__new__(Store);obj.db=raw
-        try:
-            with patch.object(obj,'check',side_effect=[None,OSError('destination lost')]):
-                with self.assertRaises(OSError):obj._ensure_scan_version()
-            self.assertNotIn('scan_version',{r[1] for r in raw.execute('PRAGMA table_info(scans)')})
-            self.assertEqual(raw.execute('SELECT COUNT(*) FROM scans').fetchone()[0],3)
-        finally:raw.close()
