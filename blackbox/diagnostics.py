@@ -8,7 +8,7 @@ import subprocess
 import time
 
 SUBSYSTEM = 'io.github.otanao1.mac-ssd-blackbox'
-EVENTS = {'recording_suspended', 'recording_resumed', 'worker_interrupt_requested',
+EVENTS = {'database_contended', 'database_resumed', 'recording_suspended', 'recording_resumed', 'worker_interrupt_requested',
           'worker_interrupt_failed', 'worker_finished', 'worker_finalize_failed',
           'worker_unexpected_exit', 'worker_start_failed', 'service_initialization_failed', 'service_initialized'}
 TOKENS = {'reason': {'recording_error', 'signal', 'user_cancel', 'worker_error', 'incomplete'},
@@ -62,7 +62,7 @@ def emit(event, *, error=None, **fields):
                 if code in errno.errorcode:
                     payload['errno_name'] = errno.errorcode[code]
         message = json.dumps(payload, separators=(',', ':'), sort_keys=True)
-        level = 'default' if event in {'recording_resumed', 'service_initialized'} else 'error'
+        level = 'default' if event in {'recording_resumed', 'service_initialized', 'database_resumed'} else 'error'
         result = subprocess.run(['/usr/bin/log', 'emit', '--type', level,
                                  '--subsystem', SUBSYSTEM, '--category', 'runtime',
                                  '--public', message], stdin=subprocess.DEVNULL,

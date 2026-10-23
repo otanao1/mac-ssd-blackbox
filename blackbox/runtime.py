@@ -13,7 +13,7 @@ import time
 import uuid
 
 from .scan import Cancelled, Scanner, normalize
-from .store import Store
+from .store import Store, is_busy
 from .metrics import disk_io
 from .diagnostics import emit as diagnostic
 
@@ -65,19 +65,23 @@ def request(store, layer, targets, options=None, cooldown=1800):
     return {'waiting': accepted, 'suppressed': suppressed}
 
 
-def observe(store, path):
+def observe(store, path, deadline=None):
     now = time.time()
     try:
         st = os.statvfs(path)
-        # df-style free/used, with unprivileged available reported separately.
         boot = subprocess.run(['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'],
                               capture_output=True, text=True, timeout=5, check=True).stdout.strip()
-        store.execute('INSERT INTO l1 VALUES(?,?,?,?,?,?,?,?)',
-                      (now, path, st.f_blocks*st.f_frsize,
-                       (st.f_blocks-st.f_bfree)*st.f_frsize,
-                       st.f_bfree*st.f_frsize, st.f_bavail*st.f_frsize, boot, None))
+        row = (now, path, st.f_blocks*st.f_frsize,
+               (st.f_blocks-st.f_bfree)*st.f_frsize,
+               st.f_bfree*st.f_frsize, st.f_bavail*st.f_frsize, boot, None)
     except (OSError, subprocess.SubprocessError) as exc:
-        store.execute('INSERT INTO l1(time,path,error) VALUES(?,?,?)', (now, path, str(exc)))
+        row = (now, path, None, None, None, None, None, str(exc))
+    # Collect outside the transaction. Failed INSERT/COMMIT leaves the deadline due.
+    store.check()
+    with store.db:
+        store.db.execute('INSERT INTO l1 VALUES(?,?,?,?,?,?,?,?)', row)
+        if deadline is not None:
+            store.db.execute("INSERT OR REPLACE INTO meta VALUES('due_L1',?)", (str(deadline),))
 
 
 def worker(directory, ident, inherited_lock, identity=None):
@@ -185,6 +189,7 @@ class Monitor:
             raise
         self.notify = notify or (lambda event: print(json.dumps(event), file=sys.stderr))
         self.recording_error = None
+        self.database_busy = False
 
     def reap(self):
         if not self.child:
@@ -252,6 +257,18 @@ class Monitor:
                 self.store.execute("INSERT OR REPLACE INTO meta VALUES('storage_probe',?)", (str(time.time()),))
             self._tick(now)
         except (OSError, sqlite3.Error) as exc:
+            if is_busy(exc):
+                try:
+                    self.store.db.rollback()
+                    self.store.check()  # BUSY must not hide a disappeared destination.
+                except (OSError, sqlite3.Error) as cleanup_error:
+                    exc = cleanup_error
+                else:
+                    if not getattr(self, 'database_busy', False):
+                        diagnostic('database_contended', error=exc, scan_id=self.active_id, stage=stage)
+                    self.database_busy = True
+                    raise
+            self.database_busy = False
             if self.recording_error is None:
                 diagnostic('recording_suspended', error=exc, scan_id=self.active_id, stage=stage)
                 self.notify(dict(event='recording_stopped', error=str(exc)))
@@ -263,7 +280,10 @@ class Monitor:
                         diagnostic('worker_interrupt_failed', error=termination_error, scan_id=self.active_id, child_pid=self.child.pid, reason='recording_error')
                         raise
             self.recording_error = str(exc)
-            raise
+            raise exc
+        if getattr(self, 'database_busy', False):
+            self.database_busy = False
+            diagnostic('database_resumed', scan_id=self.active_id)
         if self.recording_error is not None:
             self.recording_error = None
             diagnostic('recording_resumed')
@@ -280,15 +300,19 @@ class Monitor:
             last = self.store.rows('SELECT value FROM meta WHERE key=?', (key,))
             if last and now < float(last[0]['value']):
                 continue
-            self.store.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key, str(now+interval)))
             if layer == 'L1':
-                observe(self.store, self.l1_path)
+                observe(self.store, self.l1_path, now+interval)
             elif self.targets.get(layer):
-                # Requests and queued L9 have priority; periodic runs never queue.
+                # Preserve the original priority, but commit request and deadline together.
                 busy = self.child is not None or bool(self.store.rows("SELECT 1 FROM scans WHERE state IN ('running','pending') LIMIT 1")) or bool(self.store.rows('SELECT 1 FROM waiting LIMIT 1'))
-                ident = self.store.create_scan(layer, self.targets[layer], DEFAULT_OPTIONS, 'periodic', 'skipped' if busy else 'pending')
-                if busy:
-                    self.store.execute('UPDATE scans SET ended=?,error=? WHERE id=?', (time.time(), 'another scan or request has priority', ident))
+                with self.store.db:
+                    self.store.db.execute('INSERT INTO scans(id,layer,trigger,targets,options,state,created,total,ended,error) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                        (uuid.uuid4().hex, layer, 'periodic', json.dumps(self.targets[layer]), json.dumps(DEFAULT_OPTIONS),
+                         'skipped' if busy else 'pending', time.time(), len(self.targets[layer]),
+                         time.time() if busy else None, 'another scan or request has priority' if busy else None))
+                    self.store.db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key, str(now+interval)))
+            else:
+                self.store.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key, str(now+interval)))
         detect(self.store, self.targets, self.incident_thresholds)
         advance(self.store, self.targets, self.incident_thresholds, self.notify)
         due = self.store.rows("SELECT value FROM meta WHERE key='due_retention'")

@@ -10,6 +10,7 @@ import time
 from .configuration import load
 from .diagnostics import emit as diagnostic, available as diagnostic_available
 from .runtime import Monitor, lock, request
+from .store import is_busy
 
 
 def address(private):
@@ -43,6 +44,7 @@ class Service:
         self.stopped = False
         self.started = time.time()
         self.retry = 0
+        self.database_busy = False
 
     def reload(self):
         candidate = load(self.common, self.private)
@@ -76,12 +78,22 @@ class Service:
                                        retention=cfg['retention'], incident_thresholds=cfg['incident_thresholds'],
                                        identity=cfg['storage'])
             self.monitor.tick()
+            if initializing and getattr(self, 'database_busy', False):
+                diagnostic('database_resumed', stage='initialize')
+            self.database_busy = False
             if initializing and self.error is not None:
                 diagnostic('service_initialized')
             if self.error is not None:
                 print(json.dumps(dict(event='service_recording_resumed')), flush=True)
             self.error = None
         except (OSError, sqlite3.Error, ValueError) as exc:
+            if is_busy(exc) and (self.monitor is None or getattr(self.monitor, 'database_busy', False)):
+                if initializing and not getattr(self, 'database_busy', False):
+                    diagnostic('database_contended', error=exc, stage='initialize')
+                self.database_busy = True
+                self.retry = time.monotonic()+5
+                return
+            self.database_busy = False
             if self.error is None and initializing:
                 diagnostic('service_initialization_failed', error=exc, stage='initialize')
             if self.error is None:
@@ -102,16 +114,21 @@ class Service:
         if command == 'status':
             output = dict(running=True, pid=os.getpid(), started=self.started,
                           recording_error=self.error, sources=self.config['sources'], scans=[], waiting=[],
-                          diagnostic_logging=diagnostic_available())
+                          diagnostic_logging=diagnostic_available(),
+                          database_busy=getattr(self, 'database_busy', False))
             if self.monitor:
                 output['recording_error'] = self.error or self.monitor.recording_error
+                output['database_busy'] |= getattr(self.monitor, 'database_busy', False)
                 try:
                     output['scans'] = self.monitor.store.rows("SELECT * FROM scans WHERE state IN ('running','pending') ORDER BY created")
                     for scan in output['scans']:
                         scan['elapsed_seconds'] = time.time()-scan['started'] if scan['started'] else None
                     output['waiting'] = self.monitor.store.rows('SELECT * FROM waiting ORDER BY requested')
                 except (OSError, sqlite3.Error) as exc:
-                    output['recording_error'] = str(exc)
+                    if is_busy(exc):
+                        output['database_busy'] = True
+                    else:
+                        output['recording_error'] = str(exc)
             return output
         if command == 'scan':
             if self.monitor is None or self.error:

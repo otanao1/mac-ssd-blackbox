@@ -40,6 +40,12 @@ CREATE INDEX IF NOT EXISTS incident_state ON incidents(state,detected);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
+def is_busy(error):
+    """Recognize BUSY and its extended codes, never by exception text."""
+    code = getattr(error, 'sqlite_errorcode', None)
+    return isinstance(error, sqlite3.Error) and type(code) is int and (code & 0xff) == sqlite3.SQLITE_BUSY
+
+
 class Store:
     def __init__(self, directory, *, create=False, identity=None):
         self.identity = identity
