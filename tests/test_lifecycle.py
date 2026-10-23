@@ -125,6 +125,65 @@ class LifecycleTest(unittest.TestCase):
         detect(self.store, self.targets)
         self.assertEqual(len([i for i in details(self.store) if i['type']=='LOW_SPACE']), 2)
 
+    def test_day_drop_plateau_does_not_repeat_after_completion_or_restart(self):
+        self.l1(self.now-60, 20*GIB)
+        self.l1(self.now, 14*GIB)
+        detect(self.store, self.targets)
+        self.assertEqual(len(details(self.store)), 1)
+        self.assertEqual(len(self.store.rows('SELECT * FROM scans')), 1)
+        # Suppression depends on detected measurements, not investigation state.
+        self.store.execute("UPDATE incidents SET state='unidentified',stage='done'")
+        reopened = Store(self.data)
+        try:
+            for minute in range(1, 61):
+                self.l1(self.now+60*minute, 14*GIB)
+                detect(reopened, self.targets)
+            self.assertEqual(len(details(reopened, limit=100)), 1)
+            self.assertEqual(len(reopened.rows('SELECT * FROM scans')), 1)
+        finally:
+            reopened.close()
+
+    def test_new_minute_drop_is_detected_without_repeating_old_day_drop(self):
+        self.l1(self.now-60, 20*GIB)
+        for minute, free in enumerate((14, 14, 13, 13)):
+            self.l1(self.now+60*minute, free*GIB)
+            detect(self.store, self.targets)
+        items = sorted(details(self.store), key=lambda i: i['detected'])
+        self.assertEqual(len(items), 2)
+        self.assertEqual([r['rule'] for r in items[0]['detection']['rules']], ['minute', 'day'])
+        self.assertEqual([r['rule'] for r in items[1]['detection']['rules']], ['minute'])
+        self.assertEqual(len(self.store.rows('SELECT * FROM scans')), 2)
+
+    def test_new_gradual_day_drop_uses_unreported_measurements(self):
+        self.l1(self.now-60, 20*GIB)
+        self.l1(self.now, 14*GIB)
+        detect(self.store, {})
+        # Each change is below the short-term threshold; together they reach 5GiB.
+        for minute in range(1, 11):
+            self.l1(self.now+60*minute, 14*GIB-minute*(GIB//2))
+            detect(self.store, {})
+        items = sorted(details(self.store), key=lambda i: i['detected'])
+        self.assertEqual(len(items), 2)
+        rule = items[1]['detection']['rules'][0]
+        self.assertEqual(rule['rule'], 'day')
+        self.assertEqual(rule['baseline']['free'], 14*GIB)
+        self.assertEqual(items[1]['evaluation']['free_change'], -5*GIB)
+        self.l1(self.now+660, 9*GIB)
+        detect(self.store, {})
+        self.assertEqual(len(details(self.store)), 2)
+
+    def test_recovered_space_can_trigger_a_new_day_drop(self):
+        self.l1(self.now-60, 20*GIB)
+        for minute, free in enumerate((14, 20, 14, 14)):
+            # Wide spacing exercises the day rule independently of minute detection.
+            self.l1(self.now+600*minute, free*GIB)
+            detect(self.store, {})
+        items = sorted(details(self.store), key=lambda i: i['detected'])
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[1]['detected'], self.now+1200)
+        self.assertEqual(items[1]['detection']['rules'][0]['rule'], 'day')
+        self.assertEqual(items[1]['detection']['rules'][0]['baseline']['time'], self.now+600)
+
     def test_detection_jitter_gaps_errors_and_initial_sample(self):
         self.l1(self.now-61, 20*GIB)
         detect(self.store, self.targets)

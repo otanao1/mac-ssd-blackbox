@@ -93,8 +93,19 @@ def detect(store, targets, settings=None):
             # Allow scheduling jitter (up to 30s), but never classify long observation gaps as minute drops.
             if 0 < elapsed <= 90 and drop*60/elapsed >= cfg['drop_minute']:
                 triggers.append(('DROP_SPACE', 'minute', cfg['drop_minute'], previous))
+            # Do not count an already reported drop again while its old peak remains
+            # in the 24-hour window. Any DROP (minute or day) accounts for measurements
+            # through its detection time, regardless of investigation state. Reuse the
+            # existing Incident record so this also survives restart/transaction rollback.
+            day_start = current['time']-86400
+            reported = store.db.execute("""SELECT max(detected) FROM incidents
+                WHERE type='DROP_SPACE' AND detected>=? AND detected<?
+                AND json_extract(detection,'$.current.path')=?""",
+                (day_start, current['time'], current['path'])).fetchone()[0]
+            if reported is not None:
+                day_start = reported
             day = store.db.execute('SELECT * FROM l1 WHERE path=? AND time>=? AND time<? AND error IS NULL AND free IS NOT NULL ORDER BY free DESC,time LIMIT 1',
-                                   (current['path'], current['time']-86400, current['time'])).fetchone()
+                                   (current['path'], day_start, current['time'])).fetchone()
             if day and day['free']-current['free'] >= cfg['drop_day']:
                 triggers.append(('DROP_SPACE', 'day', cfg['drop_day'], dict(day)))
             if previous['free'] > cfg['low_space'] >= current['free']:
