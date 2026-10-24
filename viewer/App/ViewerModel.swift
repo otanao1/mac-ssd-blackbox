@@ -15,8 +15,7 @@ final class ViewerModel: ObservableObject {
     private var selectingSource = false
     private var timer: AnyCancellable?
     private var wake: AnyCancellable?
-    private var lastReload = Date.distantPast
-    private var lastPublishedStatus: L1Snapshot.Status?
+    private var lastReloadState: WidgetReloadState?
     private let sourceKey = "databaseSource.v1"
 
     init() {
@@ -31,11 +30,11 @@ final class ViewerModel: ObservableObject {
         Task { [weak self] in await self?.refresh() }
     }
 
-    func refresh() async {
+    func refresh(forceWidgetReload: Bool = false) async {
         guard !refreshing, !selectingSource else { return }
         now = Date()
         guard let source else {
-            publish(snapshot)
+            publish(snapshot, forceWidgetReload: forceWidgetReload)
             return
         }
         refreshing = true
@@ -51,18 +50,20 @@ final class ViewerModel: ObservableObject {
             snapshot = L1Snapshot(version: 1, generatedAt: date, samples: snapshot.samples,
                                   latest: snapshot.latest, status: .unavailable)
         }
-        publish(snapshot)
+        publish(snapshot, forceWidgetReload: forceWidgetReload)
     }
 
-    private func publish(_ value: L1Snapshot) {
+    private func publish(_ value: L1Snapshot, forceWidgetReload: Bool = false) {
         do {
             try SharedSnapshot.write(value)
             sharingMessage = nil
-            if value.status != lastPublishedStatus || now.timeIntervalSince(lastReload) >= 900 {
+            let state = WidgetReloadState(value)
+            // Notify only after the atomic write, on new observations / state
+            // changes. WidgetKit still controls when the timeline is rendered.
+            if forceWidgetReload || state != lastReloadState {
                 WidgetCenter.shared.reloadTimelines(ofKind: SharedSnapshot.widgetKind)
-                lastReload = now
+                lastReloadState = state
             }
-            lastPublishedStatus = value.status
         } catch {
             sharingMessage = "Widget共有を利用できません。署名・App Groupの設定を確認してください。"
         }

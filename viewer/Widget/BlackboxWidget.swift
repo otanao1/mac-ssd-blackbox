@@ -28,26 +28,67 @@ struct L1Provider: TimelineProvider {
 
 struct L1WidgetView: View {
     let entry: L1Entry
+    @Environment(\.widgetFamily) private var family
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("SSD空き容量").font(.caption)
-            Text(entry.snapshot.capacityText(at: entry.date, previous: true))
-                .font(.title2).bold().monospacedDigit().minimumScaleFactor(0.6)
-            if !entry.snapshot.isCurrent(at: entry.date) {
-                Text(entry.snapshot.statusText(at: entry.date))
-                    .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-            }
-            L1Chart(samples: entry.snapshot.samples, now: entry.date, compact: true)
-            if let time = entry.snapshot.latest?.time {
-                Text(time, style: .time).font(.caption2).foregroundStyle(.secondary)
-            }
-        }
-        .containerBackground(.fill.tertiary, for: .widget)
-        .widgetURL(SharedSnapshot.detailURL)
+        L1WidgetContent(entry: entry, small: family == .systemSmall)
+            .containerBackground(.fill.tertiary, for: .widget)
+            .widgetURL(SharedSnapshot.detailURL)
     }
 }
 
+// The exact content is also rendered at constrained small / medium sizes by
+// the local layout checker. No alternate user-facing mode is introduced.
+struct L1WidgetContent: View {
+    let entry: L1Entry
+    let small: Bool
+
+    private func observedTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: small ? 5 : 7) {
+            L1Chart(samples: entry.snapshot.samples, now: entry.date, compact: true, lineColor: .orange)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let status = entry.snapshot.widgetStatusText(at: entry.date) {
+                Text(status)
+                    .font(.system(size: small ? 9 : 11))
+                    .foregroundStyle(.secondary).lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: small ? 4 : 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Image(systemName: "clock")
+                    Text(entry.snapshot.latest.map { observedTime($0.time) } ?? "—")
+                        .monospacedDigit()
+                }
+                .font(.system(size: small ? 10 : 11)).foregroundStyle(.secondary)
+                .fixedSize()
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(entry.snapshot.latest.map { "最終観測 \(L1DisplayFormat.timestamp($0.time))" } ?? "最終観測なし")
+
+                Spacer(minLength: small ? 4 : 8)
+
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Text(entry.snapshot.capacityNumber(at: entry.date, previous: true))
+                        .font(.system(size: small ? 24 : 32, weight: .regular))
+                        .monospacedDigit().lineLimit(1).minimumScaleFactor(0.65)
+                        .layoutPriority(1)
+                    Text("GiB").font(.system(size: small ? 10 : 12)).foregroundStyle(.secondary)
+                        .fixedSize()
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+}
+
+#if !WIDGET_LAYOUT_CHECK
 @main
 struct BlackboxWidget: Widget {
     let kind = SharedSnapshot.widgetKind
@@ -59,3 +100,4 @@ struct BlackboxWidget: Widget {
             .supportedFamilies([.systemSmall, .systemMedium])
     }
 }
+#endif

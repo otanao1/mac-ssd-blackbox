@@ -1,4 +1,5 @@
 Local.xcconfig
+.DS_Store
 DerivedData/
 build/
 *.xcuserstate

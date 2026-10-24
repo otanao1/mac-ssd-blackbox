@@ -98,10 +98,21 @@
 			"name" = "Products";
 			"sourceTree" = "<group>";
 		};
+		"A19A19A19A19000000000001" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "folder.assetcatalog";
+			"path" = "App/Assets.xcassets";
+			"sourceTree" = "<group>";
+		};
+		"A19A19A19A19000000000002" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "A19A19A19A19000000000001";
+		};
 		"B28B7AF69320201D1CF206EB" = {
 			"isa" = "PBXGroup";
 			"children" = (
 				"B813F16BDC02AC6F98158E40",
+				"A19A19A19A19000000000001",
 				"90978D5FB1B1EFA47F4B54CB",
 				"D8D277D19EF9374FB71C6B01",
 				"624A8F936E0903B5DF7F6FC4",
@@ -239,6 +250,7 @@
 			"isa" = "PBXResourcesBuildPhase";
 			"buildActionMask" = 2147483647;
 			"files" = (
+				"A19A19A19A19000000000002",
 			);
 			"runOnlyForDeploymentPostprocessing" = 0;
 		};
@@ -249,6 +261,7 @@
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"PRODUCT_BUNDLE_IDENTIFIER" = "io.github.otanao1.blackbox-viewer";
 				"INFOPLIST_FILE" = "App/Info.plist";
+				"ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
 				"CODE_SIGN_ENTITLEMENTS" = "App/App.entitlements";
 				"GENERATE_INFOPLIST_FILE" = "NO";
 				"LD_RUNPATH_SEARCH_PATHS" = (
@@ -272,6 +285,7 @@
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"PRODUCT_BUNDLE_IDENTIFIER" = "io.github.otanao1.blackbox-viewer";
 				"INFOPLIST_FILE" = "App/Info.plist";
+				"ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
 				"CODE_SIGN_ENTITLEMENTS" = "App/App.entitlements";
 				"GENERATE_INFOPLIST_FILE" = "NO";
 				"LD_RUNPATH_SEARCH_PATHS" = (

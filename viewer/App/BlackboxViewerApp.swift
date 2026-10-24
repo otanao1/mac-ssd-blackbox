@@ -34,16 +34,20 @@ struct BlackboxViewerApp: App {
         .commands { CommandGroup(replacing: .newItem) {} }
 
         MenuBarExtra {
-            ViewerMenu()
+            ViewerMenu(model: model)
         } label: {
-            Text("SSD \(model.snapshot.capacityText(at: model.now))")
-                .monospacedDigit()
+            HStack(spacing: 4) {
+                Image(systemName: "internaldrive")
+                Text(model.snapshot.capacityText(at: model.now))
+                    .font(.system(size: 13, weight: .regular)).monospacedDigit()
+            }
         }
         .menuBarExtraStyle(.menu)
     }
 }
 
 private struct ViewerMenu: View {
+    @ObservedObject var model: ViewerModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -51,6 +55,11 @@ private struct ViewerMenu: View {
             openWindow(id: "l1", value: "l1")
             NSApp.activate(ignoringOtherApps: true)
         }
+        Button("設定…") {
+            openWindow(id: "l1", value: "l1")
+            NSApp.activate(ignoringOtherApps: true)
+            model.selectSource()
+        }.disabled(model.refreshing)
         Button("終了") { NSApp.terminate(nil) }
     }
 }
