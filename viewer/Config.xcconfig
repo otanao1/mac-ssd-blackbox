@@ -1,0 +1,4 @@
+// Team is intentionally unset. Select a signing team only after user confirmation.
+// A local override is ignored by Git and must never contain monitoring paths/data.
+BLACKBOX_APP_GROUP = $(DEVELOPMENT_TEAM).io.github.otanao1.blackbox-viewer
+#include? "Local.xcconfig"

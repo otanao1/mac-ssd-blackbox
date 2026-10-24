@@ -1,0 +1,8 @@
+Local.xcconfig
+.DS_Store
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.sqlite3*
+l1-display.json
