@@ -47,11 +47,23 @@ A lightweight daemon is managed by `launchd`. It performs L1 observations and co
 
 ### Installation
 
+#### Monitoring engine
+
 For the MVP, users obtain the project from GitHub and run a setup script. The clone working directory is not used directly as the installed runtime. Setup installs the runtime, CLI, configuration, data locations, and `launchd` registration into their intended locations.
 
 Initial setup must ask for the storage destination before monitoring starts and validate that it exists and is writable. For external SSD or NAS destinations, the setup must verify that the intended mount is present.
 
 Uninstallation must be supported, or at minimum documented with explicit manual removal steps. Runtime removal, configuration removal, and monitoring-data removal are treated separately; removing the runtime does not imply deleting collected data.
+
+See [operations](docs/operations.md) for setup commands, configuration, and removal.
+
+#### Blackbox Viewer
+
+Blackbox Viewer is an independent macOS 14 or later application for viewing the existing L1 free-space history, with a menu bar display and desktop widgets. It currently requires building from source in Xcode; it does not install or replace the monitoring engine.
+
+Set up the monitoring engine first. Open `viewer/BlackboxViewer.xcodeproj`, configure signing for both the Viewer and Widget targets, and build the macOS app. On first launch, choose the monitor's existing `local.json`, then its corresponding database storage folder. The Viewer reads the monitoring database without modifying it.
+
+See the [Blackbox Viewer guide](viewer/README.md) for requirements, signing, initial setup, and usage.
 
 ## Scope and safety
 
