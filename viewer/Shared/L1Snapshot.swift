@@ -79,6 +79,18 @@ enum L1PlotData {
         return result
     }
 
+    static func changes(_ samples: [L1Sample], now: Date) -> [L1PlotPoint] {
+        let ordered = samples.sorted { $0.time < $1.time }
+        guard ordered.count > 1 else { return [] }
+        return zip(ordered, ordered.dropFirst()).compactMap { previous, current in
+            guard current.time >= now.addingTimeInterval(-86400), current.time <= now,
+                  let a = previous.freeBytes, let b = current.freeBytes,
+                  a >= 0, b >= 0, current.time > previous.time,
+                  current.time.timeIntervalSince(previous.time) <= maximumConnectedInterval else { return nil }
+            return L1PlotPoint(time: current.time, gib: Double(b-a)/1_073_741_824, segment: 0)
+        }
+    }
+
     static func axisDates(now: Date, calendar: Calendar = .current) -> [Date] {
         let start = now.addingTimeInterval(-86_400)
         var cursor = calendar.startOfDay(for: start)
