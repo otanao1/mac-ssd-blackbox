@@ -7,6 +7,7 @@ import WidgetKit
 @MainActor
 final class ViewerModel: ObservableObject {
     @Published private(set) var snapshot = L1Snapshot.empty
+    @Published private(set) var reading: ViewerReading?
     @Published private(set) var now = Date()
     @Published private(set) var configurationMessage: String?
     @Published private(set) var sharingMessage: String?
@@ -18,7 +19,13 @@ final class ViewerModel: ObservableObject {
     private var lastReloadState: WidgetReloadState?
     private let sourceKey = "databaseSource.v1"
 
-    init() {
+    // A synthetic reading lets the standalone review harness exercise the production UI
+    // without bookmarks, timers, shared-cache writes or a monitoring database.
+    init(preview: ViewerReading? = nil) {
+        if let preview {
+            reading = preview; snapshot = preview.l1; now = preview.l1.generatedAt
+            return
+        }
         if let data = UserDefaults.standard.data(forKey: sourceKey) {
             source = try? JSONDecoder().decode(DatabaseSource.self, from: data)
         }
@@ -41,11 +48,12 @@ final class ViewerModel: ObservableObject {
         defer { refreshing = false; now = Date() }
         let date = now
         // File access and SQLite never run on the UI thread.
-        let result = await Task.detached(priority: .utility) { () -> L1Snapshot? in
-            try? DatabaseReader.read(source, now: date)
+        let result = await Task.detached(priority: .utility) { () -> ViewerReading? in
+            try? DatabaseReader.readAll(source, now: date)
         }.value
         if let result {
-            snapshot = result
+            reading = result
+            snapshot = result.l1
         } else {
             snapshot = L1Snapshot(version: 1, generatedAt: date, samples: snapshot.samples,
                                   latest: snapshot.latest, status: .unavailable)
@@ -108,6 +116,7 @@ final class ViewerModel: ObservableObject {
             UserDefaults.standard.set(encoded, forKey: sourceKey)
             source = selected
             snapshot = .empty
+            reading = nil
             configurationMessage = nil
             Task { await refresh() }
         } catch {

@@ -5,6 +5,17 @@
 	};
 	"objectVersion" = 56;
 	"objects" = {
+        "A22000000000000000000001" = {
+            "isa" = "PBXFileReference";
+            "lastKnownFileType" = "sourcecode.swift";
+            "path" = "App/StorageExplorerData.swift";
+            "sourceTree" = "<group>";
+        };
+        "A22000000000000000000002" = {
+            "isa" = "PBXBuildFile";
+            "fileRef" = "A22000000000000000000001";
+        };
+
 		"B813F16BDC02AC6F98158E40" = {
 			"isa" = "PBXFileReference";
 			"lastKnownFileType" = "text.plist.entitlements";
@@ -115,6 +126,7 @@
 				"A19A19A19A19000000000001",
 				"90978D5FB1B1EFA47F4B54CB",
 				"D8D277D19EF9374FB71C6B01",
+                "A22000000000000000000001",
 				"624A8F936E0903B5DF7F6FC4",
 				"DE7D647E94E69BAB0B51294E",
 				"D90BAE51748B564411F4FB6D",
@@ -232,6 +244,7 @@
 			"files" = (
 				"15BD4CC3F8B920435EE8FE4F",
 				"7F4A134C31D1745946385B79",
+                "A22000000000000000000002",
 				"F3F8045EA4EBAD457BA87BB6",
 				"52FF3E8D7C701584FBDCCFE9",
 				"9198C1858EE21D4177B7EBF2",

@@ -9,6 +9,8 @@ struct L1Chart: View {
     // monotone without changing the UI or introducing a user setting.
     var interpolation: InterpolationMethod = .linear
     var lineColor: Color = .accentColor
+    var midnightOnly = false
+    var showsChanges = false
 
     private var points: [L1PlotPoint] { L1PlotData.points(samples, now: now) }
 
@@ -19,26 +21,34 @@ struct L1Chart: View {
         let axisDates = L1PlotData.axisDates(now: now)
         Chart {
             if !compact {
-                ForEach(axisDates, id: \.self) { date in
+                ForEach(axisDates.filter { !midnightOnly || Calendar.current.component(.hour, from: $0) == 0 }, id: \.self) { date in
                     let midnight = Calendar.current.component(.hour, from: date) == 0
                     // RuleMarks are confined to the plot. AxisGridLine can
                     // extend through multiline axis labels in Swift Charts.
                     RuleMark(x: .value("時刻", date))
-                        .lineStyle(StrokeStyle(lineWidth: midnight ? 1 : 0.5, dash: midnight ? [] : [3, 3]))
+                        .lineStyle(StrokeStyle(lineWidth: midnight ? 1 : 0.5, dash: midnight && !midnightOnly ? [] : [3, 3]))
                         .foregroundStyle(Color.secondary.opacity(midnight ? 0.5 : 0.3))
                 }
             }
-            ForEach(plotPoints) { point in
-                LineMark(x: .value("時刻", point.time), y: .value("空き容量 (GiB)", point.gib),
-                         series: .value("区間", point.segment))
-                    .interpolationMethod(interpolation)
-                    .foregroundStyle(lineColor)
-                if singletons.contains(point.segment) {
-                    // A LineMark with a single observation has no visible line.
-                    // Preserve that observation without connecting across the gap.
-                    PointMark(x: .value("時刻", point.time), y: .value("空き容量 (GiB)", point.gib))
-                        .symbolSize(compact ? 6 : 12)
+            if showsChanges {
+                RuleMark(y: .value("0 GiB", 0)).foregroundStyle(Color.secondary.opacity(0.5))
+                ForEach(L1PlotData.changes(samples, now: now)) { point in
+                    BarMark(x: .value("時刻", point.time), y: .value("空き容量の増減 (GiB)", point.gib), width: .fixed(2))
+                        .foregroundStyle(point.gib >= 0 ? lineColor : Color.blue)
+                }
+            } else {
+                ForEach(plotPoints) { point in
+                    LineMark(x: .value("時刻", point.time), y: .value("空き容量 (GiB)", point.gib),
+                             series: .value("区間", point.segment))
+                        .interpolationMethod(interpolation)
                         .foregroundStyle(lineColor)
+                    if singletons.contains(point.segment) {
+                        // A LineMark with a single observation has no visible line.
+                        // Preserve that observation without connecting across the gap.
+                        PointMark(x: .value("時刻", point.time), y: .value("空き容量 (GiB)", point.gib))
+                            .symbolSize(compact ? 6 : 12)
+                            .foregroundStyle(lineColor)
+                    }
                 }
             }
         }
@@ -63,9 +73,9 @@ struct L1Chart: View {
         }
         .chartLegend(.hidden)
         .overlay {
-            if points.isEmpty { Text("直近24時間のデータがありません").font(.caption).foregroundStyle(.secondary) }
+            if showsChanges ? L1PlotData.changes(samples, now: now).isEmpty : points.isEmpty { Text(showsChanges ? "比較可能な観測がありません" : "直近24時間のデータがありません").font(.caption).foregroundStyle(.secondary) }
         }
-        .accessibilityLabel("直近24時間のSSD空き容量、単位GiB")
+        .accessibilityLabel(showsChanges ? "直近24時間のSSD空き容量の増減、単位GiB" : "直近24時間のSSD空き容量、単位GiB")
     }
 }
 
