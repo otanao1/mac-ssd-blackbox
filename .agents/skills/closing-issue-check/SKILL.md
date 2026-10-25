@@ -11,6 +11,8 @@ description: mac-ssd-blackboxのIssue完了・Close判断時、Merge後に終了
 
 Issueをクローズしようとする段階で、クローズ前に確認すべき事項を漏れなく確認し、未対応事項があれば明示して必要な対応を進めるために使う。実行できる対応は対象プロジェクトの`AGENTS.md`・`CLAUDE.md`等の指示、利用可能な安全ガード・開発フローに従って行い、新しい権限やルールは定義しない。
 
+[開発ルール](../../../.claude/rules/development.md)に従い、本番・実機確認の結果記録は[production-verification](../production-verification/SKILL.md)の提案と実施結果を区別して照合する。
+
 対象Issueの本文と合意済みコメントを正本とする。このSkillはmac-ssd-blackbox内で管理し、共通Skillの導入・配布・同期や他Skillへの依存を前提としない。
 
 Issueの機能的・ビジネス的な完了判断、およびIssueのクローズ判断はユーザーが行う。PRのMerge承認、機能受入、Issue単独のClose承認は別々に扱う。PR本文を扱う場合は`Related to #N`を使い、Issueを自動Closeする記法を入れない。
