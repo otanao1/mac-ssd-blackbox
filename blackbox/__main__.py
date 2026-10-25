@@ -29,6 +29,7 @@ def main():
     req.add_argument('paths', nargs='+')
     req.add_argument('--threshold', type=int, default=1024**3)
     req.add_argument('--max-depth', type=int, default=7)
+    sub.add_parser('periodic-l2', help='request configured periodic L2 without changing its schedule')
     sub.add_parser('init')
     sub.add_parser('status')
     hist = sub.add_parser('history')
@@ -56,7 +57,7 @@ def main():
     args = parser.parse_args()
     if not args.data:
         return installed(args)
-    if args.command in ('start', 'stop', 'reload', 'config', 'install', 'uninstall'):
+    if args.command in ('start', 'stop', 'reload', 'config', 'install', 'uninstall', 'periodic-l2'):
         parser.error('this command requires installed configuration, without --data')
     if args.command == 'run':
         config = json.loads(args.config.read_text()) if args.config else {}
@@ -146,7 +147,7 @@ def installed(args):
         if args.config:
             raise ValueError('use --config-dir for installed configuration')
         return run(args.common_dir, args.config_dir)
-    elif args.command in ('reload', 'config', 'status', 'scan'):
+    elif args.command in ('reload', 'config', 'status', 'scan', 'periodic-l2'):
         fields = {}
         if args.command == 'scan':
             fields = dict(layer=args.layer, paths=args.paths,

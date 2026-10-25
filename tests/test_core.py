@@ -123,16 +123,18 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(request(self.store, 'L9', [target])['suppressed'], [target])
         self.assertEqual(request(self.store, 'L9', [target], {'threshold': 1})['waiting'], [target])
 
-    def test_single_monitor_periodic_skip_and_l1_independence(self):
+    def test_single_monitor_periodic_pending_and_l1_independence(self):
         monitor = Monitor(self.data, {'L2':[str(self.tree)], 'L3':[str(self.tree)]})
         self.addCleanup(monitor.close)
         with self.assertRaises(BlockingIOError):
             Monitor(self.data)
+        for layer in ('L2', 'L3'):
+            self.store.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', ('due_' + layer, '100'))
         with patch.object(monitor, 'dispatch'), patch('blackbox.runtime.observe') as observe:
             monitor.tick(now=100)
             observe.assert_called_once()
             scans = self.store.rows('SELECT * FROM scans ORDER BY created')
-            self.assertEqual([r['state'] for r in scans], ['pending','skipped'])
+            self.assertEqual([r['state'] for r in scans], ['pending','pending'])
             monitor.tick(now=161)
             self.assertEqual(observe.call_count, 2)
             self.assertEqual(len(self.store.rows('SELECT * FROM scans')), 2)
@@ -144,15 +146,17 @@ class CoreTest(unittest.TestCase):
             time.sleep(.02)
         self.assertIsNone(monitor.child)
 
-    def test_periodic_loses_dispatch_race_without_queuing(self):
+    def test_periodic_survives_l9_dispatch_and_runs_next(self):
         monitor = Monitor(self.data)
         self.addCleanup(monitor.close)
         periodic = self.store.create_scan('L2', [str(self.tree/'missing')], DEFAULT_OPTIONS, 'periodic')
         request(self.store, 'L9', [str(self.tree/'missing')])
         monitor.dispatch()
         self.wait_child(monitor)
-        self.assertEqual(self.store.rows('SELECT state FROM scans WHERE id=?', (periodic,))[0]['state'], 'skipped')
-        self.assertFalse(self.store.rows("SELECT * FROM scans WHERE state='pending'"))
+        self.assertEqual(self.store.rows('SELECT state FROM scans WHERE id=?', (periodic,))[0]['state'], 'pending')
+        monitor.dispatch()
+        self.wait_child(monitor)
+        self.assertEqual(self.store.rows('SELECT state FROM scans WHERE id=?', (periodic,))[0]['state'], 'partial')
 
     def test_real_child_history_failure_and_recovery(self):
         monitor = Monitor(self.data)

@@ -51,6 +51,8 @@ def load(common=DEFAULT_CONFIG, private=DEFAULT_PRIVATE):
             isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
             for v in intervals.values()):
         raise ValueError('intervals must be positive finite seconds')
+    # Retain legacy settings compatibility; L2/L3 now use fixed local slots.
+    intervals.update(L2=DEFAULT_INTERVALS['L2'], L3=DEFAULT_INTERVALS['L3'])
     values['intervals'] = intervals
     values['retention'] = policy(values.get('retention'))
     values['incident_thresholds'] = thresholds(values.get('incident_thresholds'))
