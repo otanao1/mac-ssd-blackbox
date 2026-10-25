@@ -119,7 +119,9 @@ class Store:
 
     def create_scan(self, layer, targets, options, trigger='manual', state='pending'):
         ident = uuid.uuid4().hex
-        self.execute('INSERT INTO scans(id,layer,trigger,targets,options,state,created,total,scan_version) VALUES(?,?,?,?,?,?,?,?,?)',
+        self.check()
+        write = self.db.execute if self.db.in_transaction else self.execute
+        write('INSERT INTO scans(id,layer,trigger,targets,options,state,created,total,scan_version) VALUES(?,?,?,?,?,?,?,?,?)',
                      (ident, layer, trigger, json.dumps(targets), json.dumps(options), state, time.time(), len(targets), scan_version(layer)))
         return ident
 

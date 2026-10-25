@@ -1,4 +1,5 @@
 """Scheduling, durable requests and child supervision and Incident/retention coordination."""
+from datetime import date, timedelta
 import fcntl
 import json
 import math
@@ -43,13 +44,57 @@ def options_for(options=None):
     return result
 
 
+def next_periodic(layer, now):
+    """Next fixed local wall-clock slot, strictly after now (including DST changes)."""
+    if layer == 'L3':
+        candidate = (int(now // 60) + 1) * 60
+        while time.localtime(candidate).tm_min != 10:
+            candidate += 60
+        return candidate
+    local = time.localtime(now)
+    day = date(local.tm_year, local.tm_mon, local.tm_mday)
+    while True:
+        candidate = time.mktime((*day.timetuple()[:3], 7, 0, 0, 0, 0, -1))
+        if candidate > now:
+            return candidate
+        day += timedelta(days=1)
+
+
+def fixed_slot(layer, timestamp):
+    local = time.localtime(timestamp)
+    return timestamp == int(timestamp) and local.tm_sec == 0 and (
+        (local.tm_hour == 7 and local.tm_min == 0) if layer == 'L2' else local.tm_min == 10)
+
+
+def enqueue_scan(store, layer, targets, options, trigger='manual', scheduled=False):
+    """Called in an IMMEDIATE transaction so lookup and insertion are atomic."""
+    normalized = sorted({p + ('/*' if c else '') for p, c in map(normalize, targets)})
+    active = store.rows("SELECT * FROM scans WHERE layer=? AND state IN ('pending','running') ORDER BY created", (layer,))
+    if trigger == 'periodic':
+        duplicate = next((r for r in active if r['trigger'] == 'periodic' and
+                          (not scheduled or r['state'] == 'pending')), None)
+    else:
+        # Compare the complete normalized target set; different options do not
+        # allow a second manual scan of the same layer/targets while it is active.
+        duplicate = next((r for r in active if sorted(set(json.loads(r['targets']))) == normalized), None)
+    if duplicate and not scheduled:
+        return dict(scan_id=duplicate['id'], suppressed=True)
+    ident = store.create_scan(layer, normalized, options, trigger, 'skipped' if duplicate else 'pending')
+    if duplicate:
+        store.db.execute("UPDATE scans SET ended=?,error='periodic scan already pending' WHERE id=?", (time.time(), ident))
+    return dict(scan_id=ident)
+
+
 def request(store, layer, targets, options=None, cooldown=1800):
     if layer not in ('L2', 'L3', 'L9') or not targets:
         raise ValueError('specify L2/L3/L9 and at least one target')
     normalized = sorted({p + ('/*' if c else '') for p, c in map(normalize, targets)})
     opts = options_for(options)
     if layer != 'L9':
-        return {'scan_id': store.create_scan(layer, normalized, opts)}
+        store.check()
+        with store.db:
+            store.db.execute('BEGIN IMMEDIATE')
+            return enqueue_scan(store, layer, normalized, opts)
     accepted, suppressed = [], []
     encoded = json.dumps(opts, sort_keys=True)
     store.check()
@@ -175,6 +220,8 @@ class Monitor:
             os.close(self.owner)
             self.store.close()
             raise ValueError('intervals must be positive seconds')
+        # Legacy L2/L3 interval values are accepted, but never override fixed slots.
+        self.intervals.update(L2=DEFAULT_INTERVALS['L2'], L3=DEFAULT_INTERVALS['L3'])
         self.l1_path = l1_path
         self.child = None
         self.scan_lock = None
@@ -234,7 +281,6 @@ class Monitor:
                     ident = pending[0]['id']
                 else:
                     return
-                self.store.db.execute("UPDATE scans SET state='skipped',ended=?,error='another request won dispatch' WHERE state='pending' AND trigger='periodic' AND id<>?", (time.time(), ident))
                 self.store.db.execute("UPDATE scans SET state='running',started=? WHERE id=?", (time.time(), ident))
             self.active_id = ident
             try:
@@ -285,17 +331,25 @@ class Monitor:
         for layer, interval in self.intervals.items():
             key = 'due_' + layer
             last = self.store.rows('SELECT value FROM meta WHERE key=?', (key,))
-            if last and now < float(last[0]['value']):
+            due = float(last[0]['value']) if last else None
+            if layer != 'L1' and (due is None or (due > now and not fixed_slot(layer, due))):
+                # Initialize fixed time scheduling, or migrate a future legacy
+                # interval deadline. An overdue persisted deadline runs once.
+                due = next_periodic(layer, now - .001)
+            if due is not None and now < due:
+                if not last or float(last[0]['value']) != due:
+                    self.store.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key, str(due)))
                 continue
-            self.store.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key, str(now+interval)))
+            # Persist the deadline and request together. A recording failure must
+            # not advance a deadline without retaining its pending request.
+            with self.store.db:
+                self.store.db.execute('BEGIN IMMEDIATE')
+                next_due = now + interval if layer == 'L1' else next_periodic(layer, now)
+                self.store.db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key, str(next_due)))
+                if layer != 'L1' and self.targets.get(layer):
+                    enqueue_scan(self.store, layer, self.targets[layer], DEFAULT_OPTIONS, 'periodic', scheduled=True)
             if layer == 'L1':
                 observe(self.store, self.l1_path)
-            elif self.targets.get(layer):
-                # Requests and queued L9 have priority; periodic runs never queue.
-                busy = self.child is not None or bool(self.store.rows("SELECT 1 FROM scans WHERE state IN ('running','pending') LIMIT 1")) or bool(self.store.rows('SELECT 1 FROM waiting LIMIT 1'))
-                ident = self.store.create_scan(layer, self.targets[layer], DEFAULT_OPTIONS, 'periodic', 'skipped' if busy else 'pending')
-                if busy:
-                    self.store.execute('UPDATE scans SET ended=?,error=? WHERE id=?', (time.time(), 'another scan or request has priority', ident))
         detect(self.store, self.targets, self.incident_thresholds)
         advance(self.store, self.targets, self.incident_thresholds, self.notify)
         due = self.store.rows("SELECT value FROM meta WHERE key='due_retention'")
@@ -303,6 +357,15 @@ class Monitor:
             maintain(self.store, now, self.retention)
             self.store.execute("INSERT OR REPLACE INTO meta VALUES('due_retention',?)", (str(now+86400),))
         self.dispatch()
+
+    def request_periodic_l2(self):
+        targets = self.targets.get('L2')
+        if not targets:
+            raise ValueError('no periodic L2 targets configured')
+        self.store.check()
+        with self.store.db:
+            self.store.db.execute('BEGIN IMMEDIATE')
+            return enqueue_scan(self.store, 'L2', targets, DEFAULT_OPTIONS, 'periodic')
 
     def close(self):
         self.stopping = True

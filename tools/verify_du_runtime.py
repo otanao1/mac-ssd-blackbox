@@ -48,7 +48,7 @@ def main():
             connection.close()
 
     monitor = Monitor(data, {'L2':[str(tree)+'/*',str(nested)+'/*'], 'L3':[str(nested)+'/*']},
-                      intervals=dict(L1=.25,L2=1.7,L3=1.1), l1_path=str(tree),
+                      intervals=dict(L1=.25), l1_path=str(tree),
                       notify=events.append)
     counter = [0]
     def synthetic_observe(store, path):
@@ -63,13 +63,20 @@ def main():
         with patch('blackbox.runtime.observe', side_effect=synthetic_observe), \
              patch('blackbox.runtime.diagnostic', side_effect=lambda event, **kw: diagnostic_events.append(event)):
             until = time.monotonic()+10
+            simulated_due = {'L2': 0, 'L3': 0}
             while time.monotonic() < until:
+                # Exercise persisted overdue deadlines without waiting for real
+                # daily/hourly slots or changing the production schedule.
+                for layer, interval in (('L2', 1.7), ('L3', 1.1)):
+                    if time.monotonic() >= simulated_due[layer]:
+                        monitor.store.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', ('due_'+layer, str(time.time()-1)))
+                        simulated_due[layer] = time.monotonic()+interval
                 monitor.tick()
                 time.sleep(.05)
             # Drain accepted requests without creating new periodic scans.
-            monitor.intervals = dict(L1=1000,L2=1000,L3=1000)
-            for layer in ('L1','L2','L3'):
-                monitor.store.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', ('due_'+layer,str(time.time()+1000)))
+            monitor.intervals['L1'] = 1000
+            monitor.targets = {'L2': [], 'L3': []}
+            monitor.store.execute("INSERT OR REPLACE INTO meta VALUES('due_L1',?)", (str(time.time()+1000),))
             until = time.monotonic()+10
             while time.monotonic() < until:
                 monitor.tick()

@@ -228,6 +228,28 @@ class OperationsTest(unittest.TestCase):
             service.handle(dict(command='scan', layer='L9', paths=['/synthetic/after']))
             self.assertEqual(request.call_args.args[-1], 42)
 
+    def test_periodic_l2_uses_loaded_targets_and_reload_preserves_fixed_deadlines(self):
+        self.local(dict(storage=self.identity, targets=dict(L2=['/synthetic/periodic'])))
+        service = self.service()
+        with self.assertRaisesRegex(ValueError, 'recording unavailable'):
+            service.handle(dict(command='periodic-l2'))
+        with patch('blackbox.runtime.observe'), patch.object(Monitor, 'dispatch'):
+            service.tick()
+        store = service.monitor.store
+        deadlines = store.rows("SELECT * FROM meta WHERE key IN ('due_L2','due_L3') ORDER BY key")
+        ident = service.handle(dict(command='periodic-l2'))['scan_id']
+        row = store.rows('SELECT * FROM scans WHERE id=?', (ident,))[0]
+        self.assertEqual(json.loads(row['targets']), ['/synthetic/periodic'])
+        self.assertEqual(row['trigger'], 'periodic')
+        self.local(dict(storage=self.identity, targets=dict(L2=['/synthetic/changed']), intervals=dict(L2=10,L3=20)))
+        service.reload()
+        self.assertEqual(store.rows("SELECT * FROM meta WHERE key IN ('due_L2','due_L3') ORDER BY key"), deadlines)
+        self.assertEqual(service.config['intervals']['L3'], 3600)
+        self.assertTrue(service.handle(dict(command='periodic-l2'))['suppressed'])
+        store.execute("UPDATE scans SET state='succeeded' WHERE id=?", (ident,))
+        new = service.handle(dict(command='periodic-l2'))['scan_id']
+        self.assertEqual(json.loads(store.rows('SELECT targets FROM scans WHERE id=?', (new,))[0]['targets']), ['/synthetic/changed'])
+
     def test_plist_and_start_stop_are_mocked(self):
         raw = plist_bytes('/synthetic/python', '/synthetic/runtime', self.private)
         plist = plistlib.loads(raw)
@@ -364,6 +386,7 @@ class OperationsTest(unittest.TestCase):
         self.assertTrue((self.data/'blackbox.sqlite3').exists())
 
     def test_socket_service_double_start_reload_and_stop_on_synthetic_data(self):
+        self.local(dict(storage=self.identity, targets=dict(L2=['/synthetic/periodic'])))
         from blackbox.service import call, address
         import time
         # The child has no real observations or real monitored targets. All launchctl
@@ -394,12 +417,25 @@ with patch('blackbox.destination.mounted_volume', return_value=volume), \
             other = subprocess.run(args, capture_output=True, text=True, timeout=5)
             self.assertNotEqual(other.returncode, 0)
             self.assertEqual(call(self.private, 'status')['pid'], child.pid)
-            self.local(dict(storage=self.identity, intervals=dict(L1=120)))
+            self.local(dict(storage=self.identity, intervals=dict(L1=120), targets=dict(L2=['/synthetic/periodic'])))
             self.assertTrue(call(self.private, 'reload')['reloaded'])
             self.local(dict(storage=self.identity, intervals=dict(L1=0)))
             with self.assertRaises(ValueError):
                 call(self.private, 'reload')
             self.assertTrue(call(self.private, 'status')['running'])
+            cli = subprocess.run([sys.executable, '-m', 'blackbox', '--config-dir', str(self.private),
+                                  '--common-dir', str(self.common), 'periodic-l2'],
+                                 capture_output=True, text=True, check=True, timeout=5)
+            periodic = json.loads(cli.stdout)
+            duplicate = call(self.private, 'periodic-l2')
+            self.assertEqual(duplicate, dict(scan_id=periodic['scan_id'], suppressed=True))
+            store = Store(self.data, identity=self.identity)
+            try:
+                row = store.rows('SELECT * FROM scans WHERE id=?', (periodic['scan_id'],))[0]
+                self.assertEqual(row['trigger'], 'periodic')
+                self.assertEqual(json.loads(row['targets']), ['/synthetic/periodic'])
+            finally:
+                store.close()
             scan = call(self.private, 'scan', layer='L3', paths=[str(self.data/'synthetic-missing')])
             self.assertIn('scan_id', scan)
             self.assertTrue(call(self.private, 'stop')['stopping'])

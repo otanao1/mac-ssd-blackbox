@@ -54,7 +54,7 @@ class Service:
             store.check()
             with store.db:
                 for layer, interval in candidate['intervals'].items():
-                    if interval != self.config['intervals'][layer]:
+                    if layer == 'L1' and interval != self.config['intervals'][layer]:
                         store.db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',
                                          ('due_'+layer, str(time.time()+interval)))
             self.monitor.targets = candidate['targets']
@@ -113,6 +113,10 @@ class Service:
                 except (OSError, sqlite3.Error) as exc:
                     output['recording_error'] = str(exc)
             return output
+        if command == 'periodic-l2':
+            if self.monitor is None or self.error:
+                raise ValueError('recording unavailable')
+            return self.monitor.request_periodic_l2()
         if command == 'scan':
             if self.monitor is None or self.error:
                 raise ValueError('recording unavailable')

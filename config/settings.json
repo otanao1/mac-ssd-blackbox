@@ -1,5 +1,5 @@
 {
-  "intervals": {"L1": 60, "L2": 86400, "L3": 3600},
+  "intervals": {"L1": 60},
   "l1_path": "/System/Volumes/Data",
   "targets": {"L2": [], "L3": []},
   "retention": {
