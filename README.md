@@ -83,3 +83,7 @@ The MVP will **not** delete files automatically, terminate processes, perform au
 - Document installation, configuration, and removal before a public release
 
 Contributions and suggestions are welcome as the design evolves.
+
+Issue完了・Close判断時は、プロジェクト専用の [closing-issue-check](.agents/skills/closing-issue-check/SKILL.md) を使用します。Codexでは `$closing-issue-check` で明示的に呼び出せます。配置・比較・検証範囲は[確認記録](docs/closing-issue-check.md)を参照してください。
+
+開発AIの入口は[AGENTS.md](AGENTS.md)です。Issue・PR・本番／実機確認のSkills、Rules、Hookの構成と制約は[開発AI運用](docs/development-ai.md)を参照してください。
