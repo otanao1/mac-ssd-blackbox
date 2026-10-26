@@ -234,11 +234,11 @@ struct ViewerDetail: View {
                         }.contentShape(Rectangle())
                     }.buttonStyle(.plain).foregroundStyle(.primary).help("\(target.path)\n現在容量：\(capacityText)")
                     HStack(spacing: 3) {
-                        Text(StorageMath.signed(delta.gib)).font(.system(size: 12, weight: .medium)).monospacedDigit()
-                        if let reason = delta.reason { InfoButton(title: "比較できない理由", message: reason) }
-                    }.frame(width: 104, alignment: .trailing)
+                        Text(delta.displayText).font(.system(size: 12, weight: .medium)).monospacedDigit()
+                        if let reason = delta.explanation { InfoButton(title: delta.isReference ? "参考差分について" : "比較できない理由", message: reason) }
+                    }.frame(width: 140, alignment: .trailing)
                 }
-                rankBar(delta.gib).frame(height: 3)
+                rankBar(delta.gib).opacity(delta.isReference ? 0.45 : 1).frame(height: 3)
             }
             Button { expanded = expanded == target.id ? nil : target.id } label: {
                 HStack(spacing: 3) {
@@ -262,13 +262,18 @@ struct ViewerDetail: View {
         let date: Date
         let value: Double
         let segment: Int
+        let isReference: Bool
         var id: Date { date }
     }
     private func points(_ target: StorageTarget) -> [DailyPoint] {
         var segment = 0
+        var wasReference: Bool?
         return data.days.compactMap { day in
-            guard let value = day.delta(path: target.path, parent: target).gib else { segment += 1; return nil }
-            return DailyPoint(date: day.date, value: value, segment: segment)
+            let delta = day.delta(path: target.path, parent: target)
+            guard let value = delta.gib else { segment += 1; return nil }
+            if let wasReference, wasReference != delta.isReference { segment += 1 }
+            wasReference = delta.isReference
+            return DailyPoint(date: day.date, value: value, segment: segment, isReference: delta.isReference)
         }
     }
     private var daily: some View {
@@ -289,8 +294,10 @@ struct ViewerDetail: View {
             ForEach(series) { target in
                 ForEach(points(target)) { point in
                     LineMark(x: .value("日付", point.date), y: .value("GiB", point.value), series: .value("区間", "\(target.id)-\(point.segment)"))
-                        .foregroundStyle(color(target.id)).lineStyle(StrokeStyle(lineWidth: 2))
-                    PointMark(x: .value("日付", point.date), y: .value("GiB", point.value)).foregroundStyle(color(target.id)).symbolSize(24)
+                        .foregroundStyle(color(target.id)).lineStyle(StrokeStyle(lineWidth: 2, dash: point.isReference ? [4, 3] : []))
+                    PointMark(x: .value("日付", point.date), y: .value("GiB", point.value)).foregroundStyle(color(target.id)).symbol(point.isReference ? .square : .circle).symbolSize(24)
+                        .accessibilityLabel("\(target.name)、\(point.isReference ? "取得済み範囲の参考差分。未取得領域の増減は不明" : "通常差分")")
+                        .accessibilityValue(StorageMath.signed(point.value))
                 }
             }
         }.chartXScale(domain: start.addingTimeInterval(-43200)...end.addingTimeInterval(43200))
@@ -302,6 +309,8 @@ struct ViewerDetail: View {
                 }
             } }
             .chartLegend(.hidden)
+            .safeAreaInset(edge: .bottom, spacing: 2) { Text("破線・■：取得済み範囲の参考差分（未取得領域の増減は不明）").font(.caption2).foregroundStyle(.secondary) }
+            .help("参考差分は破線・四角の点。" + StorageDelta.referenceExplanation)
             .chartOverlay { proxy in
                 GeometryReader { geometry in
                     Rectangle().fill(.clear).contentShape(Rectangle()).gesture(SpatialTapGesture().onEnded { event in
@@ -365,8 +374,8 @@ private struct StorageChildren: View {
                 HStack {
                     Text(child.name).lineLimit(1).truncationMode(.middle).help(child.path)
                     Spacer()
-                    Text(StorageMath.signed(child.delta.gib)).monospacedDigit()
-                    if let reason = child.delta.reason { InfoButton(title: "比較できない理由", message: reason) }
+                    Text(child.delta.displayText).monospacedDigit()
+                    if let reason = child.delta.explanation { InfoButton(title: child.delta.isReference ? "参考差分について" : "比較できない理由", message: reason) }
                     else { Color.clear.frame(width: 14, height: 14) }
                 }.font(.system(size: 12)).frame(height: 20)
             }

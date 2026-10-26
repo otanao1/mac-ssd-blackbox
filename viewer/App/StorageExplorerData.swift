@@ -63,6 +63,7 @@ struct StorageResult: Sendable {
     let kind: String
     let bytes: Int64?
     let status: String
+    var error: String? = nil
     var usable: Bool { status == "ok" && bytes != nil && bytes! >= 0 }
 }
 struct StorageScan: Sendable {
@@ -77,6 +78,10 @@ struct StorageScan: Sendable {
 struct StorageDelta: Sendable {
     let gib: Double?
     let reason: String?
+    var isReference: Bool = false
+    static let referenceExplanation = "取得済み範囲の参考差分です。取得失敗領域は前後で一致しますが、未取得領域内部の増減は不明です。全体の確定差分ではありません。"
+    var displayText: String { (isReference ? "参考 " : "") + StorageMath.signed(gib) }
+    var explanation: String? { isReference ? Self.referenceExplanation : reason }
     static func missing(_ reason: String) -> StorageDelta { StorageDelta(gib: nil, reason: reason) }
 }
 struct StorageChild: Identifiable, Sendable {
@@ -117,9 +122,39 @@ struct StorageDay: Identifiable, Sendable {
         }
         guard let a = previous.results[path] else { return .missing("比較元に記録なし") }
         guard let b = current.results[path] else { return .missing("比較先に記録なし") }
-        guard a.usable, b.usable else { return .missing("一部取得・取得失敗・対象外のため比較不可") }
         guard a.kind == b.kind else { return .missing("項目の種類が変わったため比較不可") }
-        return StorageDelta(gib: Double(b.bytes! - a.bytes!) / 1_073_741_824, reason: nil)
+        guard let before = a.bytes, let after = b.bytes, before >= 0, after >= 0 else {
+            return .missing("有効な容量の記録なし")
+        }
+        if a.usable && b.usable {
+            return StorageDelta(gib: Double(after - before) / 1_073_741_824, reason: nil)
+        }
+        guard a.status == "partial", b.status == "partial",
+              let oldFailures = failureRegions(previous, beneath: path),
+              let newFailures = failureRegions(current, beneath: path), oldFailures == newFailures else {
+            return .missing("取得失敗領域が異なるか、失敗記録が不十分なため比較不可")
+        }
+        return StorageDelta(gib: Double(after - before) / 1_073_741_824, reason: nil, isReference: true)
+    }
+    private struct FailureRegion: Equatable {
+        let kind: String
+        let status: String
+        let error: String
+    }
+    private func failureRegions(_ scan: StorageScan, beneath path: String) -> [String: FailureRegion]? {
+        let prefix = path == "/" ? "/" : path + "/"
+        let rows = scan.results.values.filter { $0.path == path || $0.path.hasPrefix(prefix) }
+        var failures: [String: FailureRegion] = [:]
+        for row in rows where row.status != "ok" && row.status != "partial" {
+            guard ["error", "missing", "excluded"].contains(row.status),
+                  let error = row.error, !error.isEmpty else { return nil }
+            failures[row.path] = FailureRegion(kind: row.kind, status: row.status, error: error)
+        }
+        // A partial row without a preserved failure descendant is insufficient history.
+        guard !failures.isEmpty, rows.filter({ $0.status == "partial" }).allSatisfy({ row in
+            failures.keys.contains { $0.hasPrefix(row.path == "/" ? "/" : row.path + "/") }
+        }) else { return nil }
+        return failures
     }
     func children(_ parent: StorageTarget) -> [StorageChild] {
         guard parent.includesChildren else { return [] }

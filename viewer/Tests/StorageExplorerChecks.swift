@@ -49,6 +49,37 @@ struct StorageExplorerChecks {
         let partialDay = StorageDay(date: today, previous: previous, current: partial, previousL1: nil, currentL1: nil)
         precondition(partialDay.delta(path: a.path, parent: a).gib == nil)
         precondition(partialDay.delta(path: a.path+"/child", parent: a).gib == -1)
+        func referenceDay(_ old: [StorageResult], _ new: [StorageResult]) -> StorageDay {
+            StorageDay(date: today, previous: scan("old", yesterday, old), current: scan("new", currentTime, new), previousL1: nil, currentL1: nil)
+        }
+        let failure = StorageResult(path: a.path + "/child/deep/blocked", kind: "unknown", bytes: nil, status: "error", error: "permission denied")
+        let beforePartial = [row(a.path, 10*gib, "partial"), row(a.path + "/child", 2*gib, "partial"), failure]
+        let afterPartial = [row(a.path, 12*gib, "partial"), row(a.path + "/child", 4*gib, "partial"), failure]
+        let reference = referenceDay(beforePartial, afterPartial)
+        precondition(reference.delta(path: a.path, parent: a).gib == 2)
+        precondition(reference.delta(path: a.path, parent: a).isReference)
+        precondition(reference.delta(path: a.path + "/child", parent: a).gib == 2)
+        precondition(reference.delta(path: a.path + "/child", parent: a).isReference)
+        precondition(!day.delta(path: a.path, parent: a).isReference)
+        for status in ["error", "missing", "excluded"] {
+            let same = StorageResult(path: failure.path, kind: failure.kind, bytes: nil, status: status, error: "permission denied")
+            precondition(referenceDay([beforePartial[0], same], [afterPartial[0], same]).delta(path: a.path, parent: a).isReference)
+        }
+        var mutations: [[StorageResult]] = [Array(afterPartial.dropLast()), afterPartial + [StorageResult(path: a.path + "/another/deep", kind: "unknown", bytes: nil, status: "missing", error: "gone")]]
+        for changed in [StorageResult(path: failure.path, kind: "unknown", bytes: nil, status: "error", error: "changed"),
+                        StorageResult(path: failure.path, kind: "unknown", bytes: nil, status: "missing", error: failure.error),
+                        StorageResult(path: failure.path, kind: "boundary", bytes: nil, status: "error", error: failure.error),
+                        StorageResult(path: failure.path, kind: "unknown", bytes: nil, status: "error"),
+                        StorageResult(path: a.path + "-sibling/blocked", kind: "unknown", bytes: nil, status: "error", error: failure.error)] {
+            mutations.append(Array(afterPartial.dropLast()) + [changed])
+        }
+        for bytes: Int64? in [nil, -1] { mutations.append([row(a.path, bytes, "partial"), afterPartial[1], failure]) }
+        mutations.append([row(a.path, 12*gib, "partial", kind: "file"), failure])
+        for changed in mutations {
+            precondition(referenceDay(beforePartial, changed).delta(path: a.path, parent: a).gib == nil)
+            precondition(referenceDay(changed, beforePartial).delta(path: a.path, parent: a).gib == nil)
+        }
+        precondition(referenceDay([beforePartial[0]], [afterPartial[0]]).delta(path: a.path, parent: a).gib == nil)
         let kindChange = scan("changed", currentTime, [row(a.path+"/child", 0, kind: "file")])
         precondition(StorageDay(date: today, previous: previous, current: kindChange, previousL1: nil, currentL1: nil).delta(path: a.path+"/child", parent: a).gib == nil)
         let oldVersion = scan("v1", yesterday, oldRows, version: 1)
@@ -72,7 +103,7 @@ struct StorageExplorerChecks {
         precondition(sqlite3_open(url.path, &connection) == SQLITE_OK)
         let db = connection!
         func execute(_ sql: String) { precondition(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK) }
-        execute("CREATE TABLE l1(time REAL PRIMARY KEY,path TEXT,free INTEGER,error TEXT); CREATE TABLE scans(id TEXT PRIMARY KEY,layer TEXT,trigger TEXT,created REAL,started REAL,state TEXT,scan_version INTEGER,targets TEXT); CREATE TABLE results(scan_id TEXT,path TEXT,kind TEXT,bytes INTEGER,status TEXT);")
+        execute("CREATE TABLE l1(time REAL PRIMARY KEY,path TEXT,free INTEGER,error TEXT); CREATE TABLE scans(id TEXT PRIMARY KEY,layer TEXT,trigger TEXT,created REAL,started REAL,state TEXT,scan_version INTEGER,targets TEXT); CREATE TABLE results(scan_id TEXT,path TEXT,kind TEXT,bytes INTEGER,status TEXT,error TEXT);")
         let epoch = now.timeIntervalSince1970
         execute("INSERT INTO l1 VALUES(\(epoch),'/fixture/disk',900,NULL),(\(epoch-3600-90),'/fixture/disk',1200,NULL),(\(epoch-3600+90),'/fixture/disk',1100,NULL),(\(epoch-3600),'/fixture/disk',NULL,'error'),(\(epoch-86400+90),'/fixture/disk',1500,NULL),(\(epoch-10),'/another/disk',999999,NULL)")
         // Latest path must be used throughout; an earlier observation on another path is ignored.
@@ -82,7 +113,7 @@ struct StorageExplorerChecks {
         for (id,time,trigger,state,size) in [("previous",day-86400+3600,"periodic","partial",100), ("current",day+3600,"periodic","partial",130), ("manual",day+7200,"manual","succeeded",9000), ("incident",day+7300,"incident","succeeded",9999)] {
             let recordedTargets = trigger == "periodic" ? targets : "[\"/fixture/manual-only\"]"
             execute("INSERT INTO scans VALUES('\(id)','L2','\(trigger)',\(time-10),\(time),'\(state)',2,'\(recordedTargets)')")
-            execute("INSERT INTO results VALUES('\(id)','/fixture/parent','directory',\(size),'ok'),('\(id)','/fixture/parent/child','directory',\(size),'ok')")
+            execute("INSERT INTO results VALUES('\(id)','/fixture/parent','directory',\(size),'ok',NULL),('\(id)','/fixture/parent/child','directory',\(size),'ok',NULL)")
             execute("INSERT INTO l1 VALUES(\(time),'/fixture/disk',\(10000-size),NULL)")
         }
         execute("INSERT INTO l1 VALUES(\(epoch+30),'/fixture/disk',NULL,'error'),(\(epoch+1000),'/future/disk',1,NULL)")
@@ -106,5 +137,18 @@ struct StorageExplorerChecks {
         }
         let after = try Data(contentsOf: url)
         precondition(after == before)
+        // Exercise raw error preservation through SQL, using only this synthetic DB.
+        precondition(sqlite3_open(url.path, &connection) == SQLITE_OK)
+        precondition(sqlite3_exec(connection, "UPDATE results SET status='partial' WHERE path='/fixture/parent'; INSERT INTO results VALUES('previous','/fixture/parent/deep/blocked','unknown',NULL,'error','denied'),('current','/fixture/parent/deep/blocked','unknown',NULL,'error','denied');", nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(connection)
+        let partialBefore = try Data(contentsOf: url)
+        try DatabaseReader.withReadOnlyConnection(url) { db in
+            let reading = try DatabaseReader.readConnected(db, now: now.addingTimeInterval(60), calendar: utc)
+            let delta = reading.storage.days.last!.delta(path: "/fixture/parent", parent: reading.storage.targets[0])
+            precondition(delta.isReference && delta.gib == 30.0/Double(gib))
+            precondition(reading.storage.days.last!.children(reading.storage.targets[0]).first!.delta.isReference == false)
+        }
+        let partialAfter = try Data(contentsOf: url)
+        precondition(partialAfter == partialBefore)
     }
 }
