@@ -141,9 +141,10 @@ enum DatabaseReader {
         let representativeIDs = Set(Dictionary(grouping: scans, by: { calendar.startOfDay(for: $0.time) }).values.compactMap { $0.last?.id })
         var anchors: [L1Sample] = []
         for index in scans.indices where representativeIDs.contains(scans[index].id) && scans[index].completed {
-            let results = try query(db, "SELECT path,kind,bytes,status FROM results WHERE scan_id=?", [.string(scans[index].id)]) { statement in
+            let results = try query(db, "SELECT path,kind,bytes,status,error FROM results WHERE scan_id=?", [.string(scans[index].id)]) { statement in
                 StorageResult(path: try string(statement, 0), kind: try string(statement, 1),
-                              bytes: sqlite3_column_type(statement, 2) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 2), status: try string(statement, 3))
+                              bytes: sqlite3_column_type(statement, 2) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 2), status: try string(statement, 3),
+                              error: sqlite3_column_type(statement, 4) == SQLITE_NULL ? nil : try string(statement, 4))
             }
             for result in results {
                 if scans[index].results[result.path] != nil {

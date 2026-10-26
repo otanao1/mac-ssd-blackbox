@@ -24,11 +24,19 @@ enum StorageExplorerFixture {
             for (index,target) in targets.enumerated() {
                 let bytes = Int64((25 + Double(index)*2 + Double(offset+7)*Double(8-index)*0.35)*gib)
                 results[target.path] = StorageResult(path: target.path, kind: "directory", bytes: bytes,
-                                                      status: index == 7 && offset == 0 ? "partial" : "ok")
+                                                      status: index == 0 || index == 7 ? "partial" : "ok")
+                if index == 0 || index == 7 {
+                    let blocked = target.path + "/deep/blocked"
+                    results[blocked] = StorageResult(path: blocked, kind: "unknown", bytes: nil, status: "error", error: "synthetic permission denied")
+                }
                 if target.includesChildren {
                     for child in 1...26 {
                         let path = target.path + String(format: "/Sample %03d", child)
                         results[path] = StorageResult(path: path, kind: "directory", bytes: Int64((0.5 + Double(child)/10 + Double(offset+7)*Double(child%5)/20)*gib), status: child%7 == 0 ? "partial" : "ok")
+                        if child%7 == 0 {
+                            let blocked = path + "/deep/blocked"
+                            results[blocked] = StorageResult(path: blocked, kind: "unknown", bytes: nil, status: "error", error: "synthetic permission denied")
+                        }
                     }
                 }
             }
