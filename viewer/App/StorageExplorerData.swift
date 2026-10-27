@@ -261,11 +261,9 @@ struct StorageSnapshot: Sendable {
     let latest: StorageScan?
     static let empty = StorageSnapshot(targets: [], days: [], latest: nil)
     func ranking(on day: StorageDay) -> [StorageTarget] {
-        targets.sorted { a, b in
-            let x = day.delta(path: a.path, parent: a).gib, y = day.delta(path: b.path, parent: b).gib
-            return x == y ? a.path < b.path : (x ?? -.infinity) > (y ?? -.infinity)
-        }
+        StorageRanking(targets: targets, day: day).targets
     }
+
     static func make(targets: [StorageTarget], scans: [StorageScan], l1: [L1Sample], now: Date,
                      calendar: Calendar = .current, layer: StorageLayer = .l2,
                      window: StorageWindow = StorageWindow(days: 7)) -> StorageSnapshot {
@@ -302,6 +300,30 @@ struct ViewerReading: Sendable {
     var storageWindows: [StorageLayer: StorageWindow] = [:]
 }
 
+// One selected-observation calculation shared by sorting, rows and bar widths.
+// Rebuilt from the current snapshot; no cross-refresh or persistent cache.
+struct StorageRanking {
+    let targets: [StorageTarget]
+    let deltas: [String: StorageDelta]
+    let maximum: Double
+    init(targets: [StorageTarget], day: StorageDay?) {
+        deltas = Dictionary(uniqueKeysWithValues: targets.map { target in
+            (target.path, day?.delta(path: target.path, parent: target) ?? .missing("定期観測なし"))
+        })
+        let values = deltas
+        self.targets = day == nil ? targets : targets.sorted { a, b in
+            let x = values[a.path]?.gib, y = values[b.path]?.gib
+            return x == y ? a.path < b.path : (x ?? -.infinity) > (y ?? -.infinity)
+        }
+        maximum = max(0.001, deltas.values.compactMap(\.gib).map(abs).max() ?? 1)
+    }
+}
+
+struct StoragePlotData {
+    let points: [StoragePlotPoint]
+    let segments: [StoragePlotSegment]
+}
+
 struct StoragePlotPoint: Identifiable {
     let date: Date
     let value: Double
@@ -317,9 +339,11 @@ struct StoragePlotSegment: Identifiable {
     var id: Date { after.date }
 }
 enum StoragePlot {
-    static func points(_ days: [StorageDay], path: String, metric: StorageMetric) -> [StoragePlotPoint] {
-        days.compactMap { day in
-            let delta = day.comparison(path)
+    static func make(_ days: [StorageDay], path: String, metric: StorageMetric) -> StoragePlotData {
+        // Both marks use the same points and the same per-slot comparison.
+        let deltas = days.map { $0.comparison(path) }
+        let points: [StoragePlotPoint] = days.enumerated().compactMap { index, day in
+            let delta = deltas[index]
             if metric == .capacity {
                 guard let row = day.capacity(path), let bytes = row.bytes else { return nil }
                 return StoragePlotPoint(date: day.date, value: Double(bytes)/1_073_741_824,
@@ -329,18 +353,22 @@ enum StoragePlot {
             return StoragePlotPoint(date: day.date, value: value,
                                     partial: day.current?.results[path]?.status == "partial", reference: delta.isReference)
         }
-    }
-    static func segments(_ days: [StorageDay], path: String, metric: StorageMetric) -> [StoragePlotSegment] {
-        let points = points(days, path: path, metric: metric)
         let indices = Dictionary(uniqueKeysWithValues: days.enumerated().map { ($0.element.date, $0.offset) })
-        return zip(points, points.dropFirst()).map { a, b in
+        let segments = zip(points, points.dropFirst()).map { a, b in
             let index = indices[b.date]!
             let adjacent = index == indices[a.date]! + 1
-            let delta = days[index].comparison(path)
+            let delta = deltas[index]
             let style: StorageLineStyle
             if !adjacent || delta.gib == nil || (metric == .delta && a.reference != b.reference) { style = .incomparable }
             else { style = delta.isReference ? .reference : .normal }
             return StoragePlotSegment(before: a, after: b, style: style)
         }
+        return StoragePlotData(points: points, segments: segments)
+    }
+    static func points(_ days: [StorageDay], path: String, metric: StorageMetric) -> [StoragePlotPoint] {
+        make(days, path: path, metric: metric).points
+    }
+    static func segments(_ days: [StorageDay], path: String, metric: StorageMetric) -> [StoragePlotSegment] {
+        make(days, path: path, metric: metric).segments
     }
 }

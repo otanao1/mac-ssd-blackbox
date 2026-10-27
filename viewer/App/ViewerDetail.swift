@@ -175,12 +175,14 @@ struct StorageExplorerSection: View {
         }
         return data.days.last { $0.current?.completed == true } ?? data.days.last
     }
-    private var ranked: [StorageTarget] { day.map { data.ranking(on: $0) } ?? data.targets }
-    private var maximum: Double { max(0.001, ranked.compactMap { day?.delta(path: $0.path, parent: $0).gib }.map(abs).max() ?? 1) }
     private var series: [StorageTarget] { data.targets.filter { state.series.contains($0.id) }.sorted { $0.path < $1.path } }
     private var singlePath: String? { state.trail.last }
     private var singleTarget: StorageTarget? { singlePath.map(StorageTarget.init) }
     var body: some View {
+        let rankingData = state.mode == .multi ? StorageRanking(targets: data.targets, day: day) : nil
+        let plots = Dictionary(uniqueKeysWithValues: plottedTargets.map { target in
+            (target.path, StoragePlot.make(data.days, path: target.path, metric: state.metric))
+        })
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(layer.title).font(.headline)
@@ -211,7 +213,7 @@ struct StorageExplorerSection: View {
                     .accessibilityLabel("\(state.metric.alternate.rawValue)に切替")
                     .accessibilityValue("現在は\(state.metric.rawValue)表示")
             }
-            plot.frame(height: 230).id("plot-" + layer.rawValue)
+            plot(plots).frame(height: 230).id("plot-" + layer.rawValue)
             legend
             HStack {
                 Text("選択観測：\(StorageMath.stamp(day?.current?.time))").font(.caption)
@@ -224,7 +226,7 @@ struct StorageExplorerSection: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             if state.mode == .single {
-                if let path = singlePath, StoragePlot.points(data.days, path: path, metric: state.metric).isEmpty {
+                if let path = singlePath, plots[path]?.points.isEmpty == true {
                     Text("この対象の有効な\(state.metric.rawValue)記録なし").font(.caption).foregroundStyle(.secondary)
                 }
                 singleChildren.id("ranking-" + layer.rawValue)
@@ -236,7 +238,7 @@ struct StorageExplorerSection: View {
                     icon("chart.xyaxis.line", "グラフへ") { jumpTo("plot-" + layer.rawValue) }
                 }
                 if limitMessage { Text("最大5系列です。選択中の系列を解除してください。").font(.caption).foregroundStyle(.orange) }
-                ranking.id("ranking-" + layer.rawValue)
+                if let rankingData { ranking(rankingData).id("ranking-" + layer.rawValue) }
             }
         }.padding(14).background(.background, in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(.quaternary))
@@ -311,7 +313,7 @@ struct StorageExplorerSection: View {
     }
     private func dateLabel(_ date: Date) -> String { StorageMath.stamp(date) }
     private var plottedTargets: [StorageTarget] { state.mode == .single ? singleTarget.map { [$0] } ?? [] : series }
-    private var plot: some View {
+    private func plot(_ plots: [String: StoragePlotData]) -> some View {
         Chart {
             RuleMark(y: .value("0 GiB", 0)).foregroundStyle(.secondary.opacity(0.25))
             if let day { RuleMark(x: .value("選択日時", day.date)).lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(.secondary.opacity(0.5)) }
@@ -326,7 +328,7 @@ struct StorageExplorerSection: View {
             }
             // All lines first; opaque-backed markers are drawn above every series.
             ForEach(plottedTargets) { target in
-                ForEach(StoragePlot.segments(data.days, path: target.path, metric: state.metric)) { segment in
+                ForEach(plots[target.path]?.segments ?? []) { segment in
                     ForEach([segment.before, segment.after]) { point in
                         LineMark(x: .value("日時", point.date), y: .value(state.metric.axisTitle, point.value),
                                  series: .value("区間", target.id + String(segment.id.timeIntervalSince1970)))
@@ -337,7 +339,7 @@ struct StorageExplorerSection: View {
                 }
             }
             ForEach(plottedTargets) { target in
-                ForEach(StoragePlot.points(data.days, path: target.path, metric: state.metric)) { point in
+                ForEach(plots[target.path]?.points ?? []) { point in
                     PointMark(x: .value("日時", point.date), y: .value(state.metric.axisTitle, point.value))
                         .foregroundStyle(plotColor(target.id))
                         .symbol {
@@ -419,12 +421,12 @@ struct StorageExplorerSection: View {
                 .help(StorageDelta.referenceExplanation)
         }.font(.system(size: 10))
     }
-    private var ranking: some View {
+    private func ranking(_ prepared: StorageRanking) -> some View {
         ScrollViewReader { inner in
             ScrollView {
                 VStack(spacing: 0) {
-                    ForEach(ranked) { target in
-                        rankRow(target).id(target.id)
+                    ForEach(prepared.targets) { target in
+                        rankRow(target, delta: prepared.deltas[target.path]!, maximum: prepared.maximum).id(target.id)
                         if state.expanded == target.id, let day {
                             StorageChildren(target: target, day: day, query: queryBinding(target.path), page: pageBinding(target.path)).padding(.horizontal, 14).padding(.vertical, 10)
                                 .background(Color.primary.opacity(0.025))
@@ -433,19 +435,18 @@ struct StorageExplorerSection: View {
                     }
                 }
             }.frame(height: 300).clipped()
-                .onChange(of: innerJump) { _, _ in scrollToParent(inner) }
-                .onChange(of: day?.date) { _, _ in scrollToParent(inner) }
+                .onChange(of: innerJump) { _, _ in scrollToParent(inner, targets: prepared.targets) }
+                .onChange(of: day?.date) { _, _ in scrollToParent(inner, targets: prepared.targets) }
         }
     }
-    private func scrollToParent(_ proxy: ScrollViewProxy) {
-        if let id = state.expanded ?? ranked.first?.id { withAnimation { proxy.scrollTo(id, anchor: .top) } }
+    private func scrollToParent(_ proxy: ScrollViewProxy, targets: [StorageTarget]) {
+        if let id = state.expanded ?? targets.first?.id { withAnimation { proxy.scrollTo(id, anchor: .top) } }
     }
     private func color(_ id: String) -> Color {
         [Color.orange, .blue, .purple, .green, .pink][(series.firstIndex(where: { $0.id == id }) ?? 0) % 5]
     }
     private func toggle(_ id: String) { limitMessage = !state.toggle(id) }
-    private func rankRow(_ target: StorageTarget) -> some View {
-        let delta = day?.delta(path: target.path, parent: target) ?? .missing("定期観測なし")
+    private func rankRow(_ target: StorageTarget, delta: StorageDelta, maximum: Double) -> some View {
         let children = day?.children(target) ?? []
         let capacity = day?.capacity(target.path)
         let capacityText = capacity.flatMap { row in row.bytes.map { (row.status == "partial" ? "取得済み " : "") + String(format: "%.2f GiB", Double($0)/1_073_741_824) } } ?? "—"
@@ -468,7 +469,7 @@ struct StorageExplorerSection: View {
                         if let reason = delta.explanation { InfoButton(title: delta.isReference ? "参考差分について" : "比較できない理由", message: reason) }
                     }.frame(width: 140, alignment: .trailing)
                 }
-                rankBar(delta.gib).opacity(delta.isReference ? 0.45 : 1).frame(height: 3)
+                rankBar(delta.gib, maximum: maximum).opacity(delta.isReference ? 0.45 : 1).frame(height: 3)
             }
             Button { state.expanded = state.expanded == target.id ? nil : target.id } label: {
                 HStack(spacing: 3) {
@@ -478,7 +479,7 @@ struct StorageExplorerSection: View {
             }.buttonStyle(.plain).disabled(!target.includesChildren).accessibilityLabel("\(target.name)の子項目")
         }.padding(.horizontal, 8).padding(.vertical, 4)
     }
-    private func rankBar(_ value: Double?) -> some View {
+    private func rankBar(_ value: Double?, maximum: Double) -> some View {
         GeometryReader { geometry in
             let half = geometry.size.width / 2
             Path { path in path.move(to: CGPoint(x: half, y: 0)); path.addLine(to: CGPoint(x: half, y: 3)) }.stroke(.secondary.opacity(0.5))
