@@ -2,7 +2,7 @@
 # Synthetic GUI only. Does not launch/register/replace the installed app.
 set -eu
 cd "$(dirname "$0")/../.."
-output=local/issue31/GUIReview
+output=${REVIEW_OUTPUT:-local/issue31/GUIReview}
 app="$output/StorageExplorerReview.app"
 mkdir -p "$app/Contents/MacOS"
 xcrun swiftc -swift-version 5 -module-cache-path local/issue31/ModuleCache -parse-as-library \

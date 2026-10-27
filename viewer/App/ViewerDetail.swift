@@ -202,8 +202,14 @@ struct StorageExplorerSection: View {
             periodControls
             if state.mode == .single { singleNavigation }
             HStack {
-                Text(state.mode == .single ? singleTarget?.name ?? "対象なし" : "容量増減").font(.subheadline.weight(.medium))
-                Spacer(); Text("GiB").font(.caption).foregroundStyle(.secondary)
+                Text(state.mode == .single ? singleTarget?.name ?? "対象なし" : state.metric.axisTitle).font(.subheadline.weight(.medium))
+                Spacer()
+                Text("\(state.metric.axisTitle)（GiB）").font(.caption).foregroundStyle(.secondary)
+                Button { state.metric = state.metric.alternate } label: {
+                    Label(state.metric.alternate.rawValue, systemImage: "arrow.left.arrow.right")
+                }.help("グラフを\(state.metric.alternate.rawValue)に切替")
+                    .accessibilityLabel("\(state.metric.alternate.rawValue)に切替")
+                    .accessibilityValue("現在は\(state.metric.rawValue)表示")
             }
             plot.frame(height: 230).id("plot-" + layer.rawValue)
             legend
@@ -218,8 +224,8 @@ struct StorageExplorerSection: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             if state.mode == .single {
-                if let path = singlePath, StoragePlot.points(data.days, path: path, mode: .single).isEmpty {
-                    Text("この対象の有効な容量記録なし").font(.caption).foregroundStyle(.secondary)
+                if let path = singlePath, StoragePlot.points(data.days, path: path, metric: state.metric).isEmpty {
+                    Text("この対象の有効な\(state.metric.rawValue)記録なし").font(.caption).foregroundStyle(.secondary)
                 }
                 singleChildren.id("ranking-" + layer.rawValue)
             }
@@ -309,7 +315,7 @@ struct StorageExplorerSection: View {
         Chart {
             RuleMark(y: .value("0 GiB", 0)).foregroundStyle(.secondary.opacity(0.25))
             if let day { RuleMark(x: .value("選択日時", day.date)).lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(.secondary.opacity(0.5)) }
-            if state.mode == .multi {
+            if state.metric == .delta {
                 ForEach(data.days) { day in
                     if let value = day.usageGiB {
                         BarMark(x: .value("日時", day.date), y: .value("SSD使用量増減", value),
@@ -320,9 +326,9 @@ struct StorageExplorerSection: View {
             }
             // All lines first; opaque-backed markers are drawn above every series.
             ForEach(plottedTargets) { target in
-                ForEach(StoragePlot.segments(data.days, path: target.path, mode: state.mode)) { segment in
+                ForEach(StoragePlot.segments(data.days, path: target.path, metric: state.metric)) { segment in
                     ForEach([segment.before, segment.after]) { point in
-                        LineMark(x: .value("日時", point.date), y: .value("GiB", point.value),
+                        LineMark(x: .value("日時", point.date), y: .value(state.metric.axisTitle, point.value),
                                  series: .value("区間", target.id + String(segment.id.timeIntervalSince1970)))
                             .foregroundStyle(plotColor(target.id).opacity(segment.style == .reference ? 0.4 : 1))
                             .lineStyle(StrokeStyle(lineWidth: segment.style == .incomparable ? 1 : 1.8,
@@ -331,8 +337,8 @@ struct StorageExplorerSection: View {
                 }
             }
             ForEach(plottedTargets) { target in
-                ForEach(StoragePlot.points(data.days, path: target.path, mode: state.mode)) { point in
-                    PointMark(x: .value("日時", point.date), y: .value("GiB", point.value))
+                ForEach(StoragePlot.points(data.days, path: target.path, metric: state.metric)) { point in
+                    PointMark(x: .value("日時", point.date), y: .value(state.metric.axisTitle, point.value))
                         .foregroundStyle(plotColor(target.id))
                         .symbol {
                             if point.partial {
@@ -340,8 +346,8 @@ struct StorageExplorerSection: View {
                                     .overlay(StorageDiamond().stroke(plotColor(target.id), lineWidth: 0.75)).frame(width: 6, height: 6)
                             } else { Circle().fill(plotColor(target.id)).frame(width: 5, height: 5) }
                         }
-                        .accessibilityLabel("\(target.name)、\(point.partial ? "一部取得、取得済み容量" : "正常取得")、\(point.reference ? "参考比較" : "")")
-                        .accessibilityValue(String(format: "%.2f GiB", point.value))
+                        .accessibilityLabel("\(target.name)、\(point.partial ? (state.metric == .capacity ? "一部取得、取得済み容量" : "一部取得") : "正常取得")、\(point.reference ? "参考比較" : "")")
+                        .accessibilityValue(state.metric.axisTitle + " " + (state.metric == .delta ? StorageMath.signed(point.value) : String(format: "%.2f GiB", point.value)))
                 }
             }
         }
@@ -373,11 +379,11 @@ struct StorageExplorerSection: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            if state.mode == .multi, let reason = day?.usageReason {
+            if state.metric == .delta, let reason = day?.usageReason {
                 InfoButton(title: "SSD使用量増減の欠測理由", message: reason).padding(4)
             }
         }
-        .accessibilityLabel(state.mode == .single ? "容量時系列、GiB" : "使用量増減、GiB")
+        .accessibilityLabel(state.metric == .capacity ? "容量時系列、GiB" : "容量差分、GiB")
         .accessibilityAction(named: "前の観測を選択") { moveObservation(-1) }
         .accessibilityAction(named: "次の観測を選択") { moveObservation(1) }
     }
@@ -400,7 +406,7 @@ struct StorageExplorerSection: View {
     private var legend: some View {
         VStack(alignment: .leading, spacing: 5) {
             LegendFlow(spacing: 12) {
-                if state.mode == .multi { Text("▰ SSD使用量増減").foregroundStyle(.secondary) }
+                if state.metric == .delta { Text("▰ SSD使用量増減").foregroundStyle(.secondary) }
                 ForEach(plottedTargets) { target in
                     HStack(spacing: 5) {
                         Circle().fill(plotColor(target.id)).frame(width: 5, height: 5)

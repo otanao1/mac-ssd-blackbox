@@ -20,8 +20,15 @@ struct StorageWindow: Equatable, Sendable {
 
 enum StorageMode: String, CaseIterable { case single = "Single", multi = "Multi" }
 
+enum StorageMetric: String, CaseIterable {
+    case capacity = "容量", delta = "差分"
+    var alternate: StorageMetric { self == .capacity ? .delta : .capacity }
+    var axisTitle: String { self == .capacity ? "容量" : "容量差分" }
+}
+
 struct StorageSelection {
     var mode: StorageMode
+    var metric: StorageMetric
     var series: Set<String> = []
     var initialized = false
     var selectedDate: Date?
@@ -29,7 +36,10 @@ struct StorageSelection {
     var expanded: String?
     var childQueries: [String: String] = [:]
     var childPages: [String: Int] = [:]
-    init(layer: StorageLayer) { mode = layer == .l2 ? .multi : .single }
+    init(layer: StorageLayer) {
+        mode = layer == .l2 ? .multi : .single
+        metric = layer == .l2 ? .delta : .capacity
+    }
     mutating func initialize(_ data: StorageSnapshot) {
         guard !data.targets.isEmpty else { return }
         if initialized {
@@ -307,10 +317,10 @@ struct StoragePlotSegment: Identifiable {
     var id: Date { after.date }
 }
 enum StoragePlot {
-    static func points(_ days: [StorageDay], path: String, mode: StorageMode) -> [StoragePlotPoint] {
+    static func points(_ days: [StorageDay], path: String, metric: StorageMetric) -> [StoragePlotPoint] {
         days.compactMap { day in
             let delta = day.comparison(path)
-            if mode == .single {
+            if metric == .capacity {
                 guard let row = day.capacity(path), let bytes = row.bytes else { return nil }
                 return StoragePlotPoint(date: day.date, value: Double(bytes)/1_073_741_824,
                                         partial: row.status == "partial", reference: delta.isReference)
@@ -320,15 +330,15 @@ enum StoragePlot {
                                     partial: day.current?.results[path]?.status == "partial", reference: delta.isReference)
         }
     }
-    static func segments(_ days: [StorageDay], path: String, mode: StorageMode) -> [StoragePlotSegment] {
-        let points = points(days, path: path, mode: mode)
+    static func segments(_ days: [StorageDay], path: String, metric: StorageMetric) -> [StoragePlotSegment] {
+        let points = points(days, path: path, metric: metric)
         let indices = Dictionary(uniqueKeysWithValues: days.enumerated().map { ($0.element.date, $0.offset) })
         return zip(points, points.dropFirst()).map { a, b in
             let index = indices[b.date]!
             let adjacent = index == indices[a.date]! + 1
             let delta = days[index].comparison(path)
             let style: StorageLineStyle
-            if !adjacent || delta.gib == nil || (mode == .multi && a.reference != b.reference) { style = .incomparable }
+            if !adjacent || delta.gib == nil || (metric == .delta && a.reference != b.reference) { style = .incomparable }
             else { style = delta.isReference ? .reference : .normal }
             return StoragePlotSegment(before: a, after: b, style: style)
         }

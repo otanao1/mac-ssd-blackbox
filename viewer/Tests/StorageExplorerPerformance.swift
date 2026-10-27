@@ -32,8 +32,8 @@ struct StorageExplorerPerformance {
                     : data.targets.filter { state.series.contains($0.id) }.sorted { $0.path < $1.path }
                 let count = measure("\(layer.rawValue)_\(mode.rawValue)_chart_input") {
                     targets.reduce(0) { count, target in
-                        count + StoragePlot.segments(data.days, path: target.path, mode: mode).count
-                            + StoragePlot.points(data.days, path: target.path, mode: mode).count
+                        count + StoragePlot.segments(data.days, path: target.path, metric: state.metric).count
+                            + StoragePlot.points(data.days, path: target.path, metric: state.metric).count
                     }
                 }
                 print("\(layer.rawValue)_\(mode.rawValue) points+segments=\(count)")

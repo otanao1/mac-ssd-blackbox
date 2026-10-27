@@ -179,13 +179,33 @@ struct StorageExplorerChecks {
         precondition(days[2].comparison(parent.path).gib == nil)
         precondition(days[3].comparison(parent.path).isReference)
         precondition(days[4].comparison(parent.path).gib == nil)
-        let single = StoragePlot.points(days, path: parent.path, mode: .single)
-        let multi = StoragePlot.points(days, path: parent.path, mode: .multi)
-        precondition(single.count == 6 && single.filter(\.partial).count == 3)
-        precondition(multi.count == 2 && multi.last!.reference)
-        let lines = StoragePlot.segments(days, path: parent.path, mode: .single)
+        let capacity = StoragePlot.points(days, path: parent.path, metric: .capacity)
+        let delta = StoragePlot.points(days, path: parent.path, metric: .delta)
+        precondition(capacity.count == 6 && capacity.filter(\.partial).count == 3)
+        precondition(delta.count == 2 && delta.last!.reference)
+        // Cardinality changes never change the metric or selected observation.
+        for layer in StorageLayer.allCases {
+            var state = StorageSelection(layer: layer); state.initialize(data)
+            state.selectedDate = days[3].date; state.trail.append(nested.path)
+            let selectedSeries = state.series
+            for mode in StorageMode.allCases {
+                state.mode = mode
+                for metric in StorageMetric.allCases {
+                    state.metric = metric
+                    let points = StoragePlot.points(days, path: parent.path, metric: state.metric)
+                    precondition(points.map(\.value) == (metric == .capacity ? [10,11,12,13,14,15] : [1,1]))
+                    precondition(state.metric.alternate.alternate == metric)
+                    precondition(state.metric.alternate.rawValue == (metric == .capacity ? "差分" : "容量"))
+                    state.metric = state.metric.alternate
+                    state.initialize(data)
+                    precondition(state.mode == mode && state.metric == metric.alternate)
+                    precondition(state.series == selectedSeries && state.trail.last == nested.path && state.selectedDate == days[3].date)
+                }
+            }
+        }
+        let lines = StoragePlot.segments(days, path: parent.path, metric: .capacity)
         precondition(lines.contains { $0.style == .reference } && lines.contains { $0.style == .incomparable })
-        precondition(StoragePlot.segments(days, path: parent.path, mode: .multi).allSatisfy { $0.style == .incomparable })
+        precondition(StoragePlot.segments(days, path: parent.path, metric: .delta).allSatisfy { $0.style == .incomparable })
         precondition(days.last!.subfolders(parent.path).count == 1)
         precondition(days.last!.subfolders(nested.path).count == 1)
         precondition(days.last!.capacity(parent.path+"/blocked/deep") == nil)
@@ -198,6 +218,10 @@ struct StorageExplorerChecks {
         let inProgress = StorageSnapshot.make(targets: [parent], scans: scans.dropLast()+[pending], l1: [], now: end,
                                               calendar: cal, layer: .l3, window: StorageWindow(days: 1))
         precondition(inProgress.days.last!.capacity(parent.path) == nil)
+        for metric in StorageMetric.allCases {
+            precondition(!StoragePlot.points(inProgress.days, path: parent.path, metric: metric).contains { $0.date == inProgress.days.last!.date })
+            precondition(StoragePlot.points(data.days, path: "/fixture/missing", metric: metric).isEmpty)
+        }
         let past = StorageWindow(days: 3).moving(-1, now: end, calendar: cal)
         precondition(past.end == cal.date(byAdding: .day, value: -3, to: end))
         precondition(past.moving(1, now: end, calendar: cal).end == nil)
@@ -209,13 +233,15 @@ struct StorageExplorerChecks {
         var selection = StorageSelection(layer: .l3); selection.initialize(data)
         selection.trail.append(nested.path); selection.selectedDate = days[1].date
         selection.childQueries[parent.path] = "child"; selection.childPages[parent.path] = 1
+        selection.metric = .delta; selection.mode = .multi
         selection.initialize(data)
+        precondition(selection.metric == .delta && selection.mode == .multi)
         precondition(selection.trail.count == 2 && selection.childPages[parent.path] == 1)
         for i in 0..<10 { _ = selection.toggle("/extra-\(i)") }
         precondition(selection.series.count == 5)
         selection = StorageSelection(layer: .l3); selection.initialize(data)
-        precondition(selection.mode == .single && selection.trail.count == 1 && selection.selectedDate == nil && selection.childQueries.isEmpty)
-        precondition(StorageSelection(layer: .l2).mode == .multi)
+        precondition(selection.mode == .single && selection.metric == .capacity && selection.trail.count == 1 && selection.selectedDate == nil && selection.childQueries.isEmpty)
+        precondition(StorageSelection(layer: .l2).mode == .multi && StorageSelection(layer: .l2).metric == .delta)
         cal.timeZone = TimeZone(identifier: "America/Los_Angeles")!
         for (month,day,count) in [(3,8,23),(11,1,25)] {
             let dst = cal.date(from: DateComponents(year: 2026, month: month, day: day, hour: 18))!
@@ -224,7 +250,7 @@ struct StorageExplorerChecks {
             precondition(hourly.days.count == count && Set(hourly.days.map(\.date)).count == count)
         }
         try hourlyDatabaseChecks(end: end)
-        print("PASS: L3 hourly/DST/gaps/reference; Single capacity/drilldown; dotted connectors without fabricated deltas; END/navigation; selection/reset")
+        print("PASS: L3 hourly/DST/gaps/reference; Single/Multi independent capacity/delta, defaults, state/drilldown; dotted connectors without fabricated deltas; END/navigation; selection/reset")
     }
 
     static func hourlyDatabaseChecks(end: Date) throws {
