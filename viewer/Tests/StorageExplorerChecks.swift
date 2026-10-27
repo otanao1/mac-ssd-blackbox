@@ -249,8 +249,64 @@ struct StorageExplorerChecks {
                                               layer: .l3, window: StorageWindow(days: 1))
             precondition(hourly.days.count == count && Set(hourly.days.map(\.date)).count == count)
         }
+        let decreasing = StorageSnapshot.make(targets: [parent,nested], scans: [scan(-1, 15),scan(0, 14)], l1: [], now: end,
+                                              calendar: cal, layer: .l3, window: StorageWindow(days: 1))
+        precondition(decreasing.days.last!.comparison(parent.path).gib == -1)
+        let invalidBytes = StorageSnapshot.make(targets: [parent,nested], scans: [scan(-1, 15),scan(0, -1)], l1: [], now: end,
+                                                calendar: cal, layer: .l3, window: StorageWindow(days: 1))
+        for snapshot in [data, gap, inProgress, empty, decreasing, invalidBytes] { preparedChecks(snapshot) }
+        preparedChecks(.empty)
         try hourlyDatabaseChecks(end: end)
         print("PASS: L3 hourly/DST/gaps/reference; Single/Multi independent capacity/delta, defaults, state/drilldown; dotted connectors without fabricated deltas; END/navigation; selection/reset")
+    }
+
+    // Independent pre-optimization construction is the regression oracle:
+    // preserve ordering, explanations, every observation and every connector.
+    static func preparedChecks(_ data: StorageSnapshot) {
+        func same(_ a: StorageDelta, _ b: StorageDelta) {
+            precondition(a.gib == b.gib && a.reason == b.reason && a.isReference == b.isReference)
+        }
+        func same(_ a: StoragePlotPoint, _ b: StoragePlotPoint) {
+            precondition(a.date == b.date && a.value == b.value && a.partial == b.partial && a.reference == b.reference)
+        }
+        for day in data.days {
+            let ranked = data.targets.sorted { a, b in
+                let x = day.delta(path: a.path, parent: a).gib, y = day.delta(path: b.path, parent: b).gib
+                return x == y ? a.path < b.path : (x ?? -.infinity) > (y ?? -.infinity)
+            }
+            let prepared = StorageRanking(targets: data.targets, day: day)
+            precondition(prepared.targets == ranked)
+            precondition(prepared.maximum == max(0.001, ranked.compactMap { day.delta(path: $0.path, parent: $0).gib }.map(abs).max() ?? 1))
+            for target in data.targets { same(prepared.deltas[target.path]!, day.delta(path: target.path, parent: target)) }
+        }
+        let unavailable = StorageRanking(targets: data.targets, day: nil)
+        precondition(unavailable.targets == data.targets && unavailable.maximum == 1)
+        for delta in unavailable.deltas.values { precondition(delta.gib == nil && delta.reason == "定期観測なし") }
+        let paths = Set(data.targets.map(\.path) + data.days.flatMap { $0.current?.results.keys.map { $0 } ?? [] } + ["/fixture/unrecorded"])
+        for path in paths { for metric in StorageMetric.allCases {
+            let expected: [StoragePlotPoint] = data.days.compactMap { day in
+                let delta = day.comparison(path)
+                if metric == .capacity {
+                    guard let row = day.capacity(path), let bytes = row.bytes else { return nil }
+                    return StoragePlotPoint(date: day.date, value: Double(bytes)/1_073_741_824, partial: row.status == "partial", reference: delta.isReference)
+                }
+                guard let value = delta.gib else { return nil }
+                return StoragePlotPoint(date: day.date, value: value, partial: day.current?.results[path]?.status == "partial", reference: delta.isReference)
+            }
+            let prepared = StoragePlot.make(data.days, path: path, metric: metric)
+            precondition(prepared.points.count == expected.count)
+            for (a,b) in zip(prepared.points, expected) { same(a,b) }
+            let indices = Dictionary(uniqueKeysWithValues: data.days.enumerated().map { ($0.element.date, $0.offset) })
+            let segments = Array(zip(expected, expected.dropFirst()))
+            precondition(prepared.segments.count == segments.count)
+            for (actual,pair) in zip(prepared.segments,segments) {
+                let (a,b) = pair, index = indices[b.date]!
+                let delta = data.days[index].comparison(path)
+                let style: StorageLineStyle = index != indices[a.date]! + 1 || delta.gib == nil || (metric == .delta && a.reference != b.reference)
+                    ? .incomparable : delta.isReference ? .reference : .normal
+                same(actual.before,a); same(actual.after,b); precondition(actual.style == style)
+            }
+        }}
     }
 
     static func hourlyDatabaseChecks(end: Date) throws {
