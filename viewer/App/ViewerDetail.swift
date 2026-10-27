@@ -309,7 +309,8 @@ struct StorageExplorerSection: View {
             if state.mode == .multi {
                 ForEach(data.days) { day in
                     if let value = day.usageGiB {
-                        BarMark(x: .value("日時", day.date), y: .value("SSD使用量増減", value), width: .ratio(0.5))
+                        BarMark(x: .value("日時", day.date), y: .value("SSD使用量増減", value),
+                                width: .fixed(max(1, min(25, 300 / Double(max(1, data.days.count))))))
                             .foregroundStyle(.gray.opacity(0.28))
                     }
                 }

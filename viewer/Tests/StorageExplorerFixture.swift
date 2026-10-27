@@ -67,7 +67,7 @@ enum StorageExplorerFixture {
                              hourComparison: StorageMath.comparison(latest: latest, hours: 1, samples: samples),
                              predecessor: samples.last { $0.time < now.addingTimeInterval(-86400) },
                              storage: StorageSnapshot.make(targets: targets, scans: scans, l1: anchors, now: now, window: windows[.l2] ?? StorageWindow(days: 7)),
-                             storageL3: StorageSnapshot.make(targets: l3Targets, scans: hourly, l1: anchors, now: now, layer: .l3, window: windows[.l3] ?? StorageWindow(days: 3)),
+                             storageL3: StorageSnapshot.make(targets: l3Targets, scans: hourly, l1: hourly.map { L1Sample(time: $0.time, freeBytes: free($0.time)) }, now: now, layer: .l3, window: windows[.l3] ?? StorageWindow(days: 3)),
                              storageWindows: [.l2: windows[.l2] ?? StorageWindow(days: 7), .l3: windows[.l3] ?? StorageWindow(days: 3)])
     }
 }
