@@ -93,12 +93,14 @@ struct StorageExplorerChecks {
         let dstDays = StorageSnapshot.make(targets: [], scans: [], l1: [], now: dst, calendar: calendar).days
         precondition(dstDays.count == 7 && Set(dstDays.map { calendar.startOfDay(for: $0.date) }).count == 7)
         try databaseChecks()
+        try extensionChecks()
         print("PASS: L1 ±90s/ties/sign, L2 parents/children/partial/missing/version, shared time anchors, 7 calendar days, readonly SQL")
     }
 
     static func databaseChecks() throws {
         let folder = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         let url = folder.appendingPathComponent("storage-checks-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: url) }
         var connection: OpaquePointer?
         precondition(sqlite3_open(url.path, &connection) == SQLITE_OK)
         let db = connection!
@@ -151,4 +153,133 @@ struct StorageExplorerChecks {
         let partialAfter = try Data(contentsOf: url)
         precondition(partialAfter == partialBefore)
     }
+    static func extensionChecks() throws {
+        precondition(StorageLayer.l2.periodDays == [7, 30])
+        precondition(StorageLayer.l3.periodDays == [1, 3, 7, 30])
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let end = cal.date(from: DateComponents(year: 2026, month: 4, day: 21, hour: 18, minute: 30))!
+        let parent = StorageTarget("/fixture/root/*")
+        let nested = StorageTarget("/fixture/root/child/*")
+        func scan(_ hour: Int, _ bytes: Int64, status: String = "ok", failure: String = "denied", state: String = "partial") -> StorageScan {
+            let time = cal.date(byAdding: .hour, value: hour, to: cal.dateInterval(of: .hour, for: end)!.start)!.addingTimeInterval(600)
+            let rows = [StorageResult(path: parent.path, kind: "directory", bytes: bytes*gib, status: status),
+                        StorageResult(path: nested.path, kind: "directory", bytes: gib, status: "ok"),
+                        StorageResult(path: nested.path+"/grandchild", kind: "directory", bytes: gib, status: "ok"),
+                        StorageResult(path: parent.path+"/blocked/deep", kind: "unknown", bytes: nil, status: "error", error: failure)]
+            return StorageScan(id: "hour-\(hour)", time: time, state: state, version: 2,
+                               targets: [parent,nested], results: Dictionary(uniqueKeysWithValues: rows.map { ($0.path,$0) }))
+        }
+        let scans = [scan(-5, 10),scan(-4, 11),scan(-3, 12, status: "partial"),
+                     scan(-2, 13, status: "partial"),scan(-1, 14, status: "partial", failure: "changed"),scan(0, 15)]
+        let data = StorageSnapshot.make(targets: [parent,nested], scans: scans, l1: [], now: end,
+                                        calendar: cal, layer: .l3, window: StorageWindow(days: 1))
+        precondition(data.days.count == 24)
+        let days = Array(data.days.suffix(6))
+        precondition(days[1].comparison(parent.path).gib == 1)
+        precondition(days[2].comparison(parent.path).gib == nil)
+        precondition(days[3].comparison(parent.path).isReference)
+        precondition(days[4].comparison(parent.path).gib == nil)
+        let capacity = StoragePlot.points(days, path: parent.path, metric: .capacity)
+        let delta = StoragePlot.points(days, path: parent.path, metric: .delta)
+        precondition(capacity.count == 6 && capacity.filter(\.partial).count == 3)
+        precondition(delta.count == 2 && delta.last!.reference)
+        // Cardinality changes never change the metric or selected observation.
+        for layer in StorageLayer.allCases {
+            var state = StorageSelection(layer: layer); state.initialize(data)
+            state.selectedDate = days[3].date; state.trail.append(nested.path)
+            let selectedSeries = state.series
+            for mode in StorageMode.allCases {
+                state.mode = mode
+                for metric in StorageMetric.allCases {
+                    state.metric = metric
+                    let points = StoragePlot.points(days, path: parent.path, metric: state.metric)
+                    precondition(points.map(\.value) == (metric == .capacity ? [10,11,12,13,14,15] : [1,1]))
+                    precondition(state.metric.alternate.alternate == metric)
+                    precondition(state.metric.alternate.rawValue == (metric == .capacity ? "差分" : "容量"))
+                    state.metric = state.metric.alternate
+                    state.initialize(data)
+                    precondition(state.mode == mode && state.metric == metric.alternate)
+                    precondition(state.series == selectedSeries && state.trail.last == nested.path && state.selectedDate == days[3].date)
+                }
+            }
+        }
+        let lines = StoragePlot.segments(days, path: parent.path, metric: .capacity)
+        precondition(lines.contains { $0.style == .reference } && lines.contains { $0.style == .incomparable })
+        precondition(StoragePlot.segments(days, path: parent.path, metric: .delta).allSatisfy { $0.style == .incomparable })
+        precondition(days.last!.subfolders(parent.path).count == 1)
+        precondition(days.last!.subfolders(nested.path).count == 1)
+        precondition(days.last!.capacity(parent.path+"/blocked/deep") == nil)
+        precondition(days.last!.subfolders(parent.path+"/blocked").isEmpty)
+        var gapScans = scans; gapScans.remove(at: 3)
+        let gap = StorageSnapshot.make(targets: [parent], scans: gapScans, l1: [], now: end, calendar: cal,
+                                       layer: .l3, window: StorageWindow(days: 1))
+        precondition(gap.days[gap.days.count-2].comparison(parent.path).gib == nil)
+        let pending = scan(0, 99, state: "pending")
+        let inProgress = StorageSnapshot.make(targets: [parent], scans: scans.dropLast()+[pending], l1: [], now: end,
+                                              calendar: cal, layer: .l3, window: StorageWindow(days: 1))
+        precondition(inProgress.days.last!.capacity(parent.path) == nil)
+        for metric in StorageMetric.allCases {
+            precondition(!StoragePlot.points(inProgress.days, path: parent.path, metric: metric).contains { $0.date == inProgress.days.last!.date })
+            precondition(StoragePlot.points(data.days, path: "/fixture/missing", metric: metric).isEmpty)
+        }
+        let past = StorageWindow(days: 3).moving(-1, now: end, calendar: cal)
+        precondition(past.end == cal.date(byAdding: .day, value: -3, to: end))
+        precondition(past.moving(1, now: end, calendar: cal).end == nil)
+        var resized = past; resized.days = 30
+        precondition(resized.end == past.end)
+        let empty = StorageSnapshot.make(targets: [parent], scans: scans, l1: [], now: end, calendar: cal,
+                                         layer: .l3, window: resized)
+        precondition(empty.days.allSatisfy { $0.current == nil })
+        var selection = StorageSelection(layer: .l3); selection.initialize(data)
+        selection.trail.append(nested.path); selection.selectedDate = days[1].date
+        selection.childQueries[parent.path] = "child"; selection.childPages[parent.path] = 1
+        selection.metric = .delta; selection.mode = .multi
+        selection.initialize(data)
+        precondition(selection.metric == .delta && selection.mode == .multi)
+        precondition(selection.trail.count == 2 && selection.childPages[parent.path] == 1)
+        for i in 0..<10 { _ = selection.toggle("/extra-\(i)") }
+        precondition(selection.series.count == 5)
+        selection = StorageSelection(layer: .l3); selection.initialize(data)
+        precondition(selection.mode == .single && selection.metric == .capacity && selection.trail.count == 1 && selection.selectedDate == nil && selection.childQueries.isEmpty)
+        precondition(StorageSelection(layer: .l2).mode == .multi && StorageSelection(layer: .l2).metric == .delta)
+        cal.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        for (month,day,count) in [(3,8,23),(11,1,25)] {
+            let dst = cal.date(from: DateComponents(year: 2026, month: month, day: day, hour: 18))!
+            let hourly = StorageSnapshot.make(targets: [], scans: [], l1: [], now: dst, calendar: cal,
+                                              layer: .l3, window: StorageWindow(days: 1))
+            precondition(hourly.days.count == count && Set(hourly.days.map(\.date)).count == count)
+        }
+        try hourlyDatabaseChecks(end: end)
+        print("PASS: L3 hourly/DST/gaps/reference; Single/Multi independent capacity/delta, defaults, state/drilldown; dotted connectors without fabricated deltas; END/navigation; selection/reset")
+    }
+
+    static func hourlyDatabaseChecks(end: Date) throws {
+        let folder = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+        let url = folder.appendingPathComponent("hourly-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var connection: OpaquePointer?
+        precondition(sqlite3_open(url.path, &connection) == SQLITE_OK)
+        func exec(_ sql: String) { precondition(sqlite3_exec(connection, sql, nil, nil, nil) == SQLITE_OK) }
+        exec("CREATE TABLE l1(time REAL,path TEXT,free INTEGER,error TEXT); CREATE TABLE scans(id TEXT,layer TEXT,trigger TEXT,created REAL,started REAL,state TEXT,scan_version INTEGER,targets TEXT); CREATE TABLE results(scan_id TEXT,path TEXT,kind TEXT,bytes INTEGER,status TEXT,error TEXT); CREATE TABLE l3_daily(bucket REAL,summary TEXT);")
+        let epoch = end.timeIntervalSince1970
+        exec("INSERT INTO l1 VALUES(\(epoch),'/fixture/disk',1000,NULL)")
+        for (id,age,trigger,state,size) in [("a",7200.0,"periodic","succeeded",10),("b",3600.0,"periodic","succeeded",11),("c",0.0,"periodic","succeeded",12),("manual",1.0,"manual","succeeded",9000),("incident",2.0,"incident","succeeded",8000)] {
+            exec("INSERT INTO scans VALUES('\(id)','L3','\(trigger)',\(epoch-age),\(epoch-age),'\(state)',2,'[\"/fixture/root/*\"]'); INSERT INTO results VALUES('\(id)','/fixture/root','directory',\(size), 'ok',NULL)")
+        }
+        exec("INSERT INTO l3_daily VALUES(0,'{\"last_bytes\":999999}')")
+        sqlite3_close(connection)
+        let before = try Data(contentsOf: url)
+        try DatabaseReader.withReadOnlyConnection(url) { db in
+            let reading = try DatabaseReader.readConnected(db, now: end)
+            precondition(reading.storage.targets.isEmpty)
+            precondition(reading.storageL3.targets.count == 1)
+            precondition(reading.storageL3.days.last!.comparison("/fixture/root").gib == 1/Double(gib))
+            let old = try DatabaseReader.readConnected(db, now: end, windows: [.l3: StorageWindow(days: 30, end: end.addingTimeInterval(-86400*40))])
+            precondition(old.storageL3.days.allSatisfy { $0.current == nil })
+            precondition(sqlite3_exec(db, "DELETE FROM results", nil, nil, nil) != SQLITE_OK)
+        }
+        let after = try Data(contentsOf: url)
+        precondition(after == before)
+    }
+
 }

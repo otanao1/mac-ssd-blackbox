@@ -12,6 +12,12 @@ final class ViewerModel: ObservableObject {
     @Published private(set) var configurationMessage: String?
     @Published private(set) var sharingMessage: String?
     @Published private(set) var refreshing = false
+    @Published private(set) var storageWindows: [StorageLayer: StorageWindow] = [.l2: StorageWindow(days: 7), .l3: StorageWindow(days: 3)]
+    @Published private(set) var resetID = 0
+    @Published private(set) var storageRevision = 0
+    private var pendingRefresh = false
+    private var previewMode = false
+    private var previewLoader: (([StorageLayer: StorageWindow]) -> ViewerReading)?
     private var source: DatabaseSource?
     private var selectingSource = false
     private var timer: AnyCancellable?
@@ -21,9 +27,9 @@ final class ViewerModel: ObservableObject {
 
     // A synthetic reading lets the standalone review harness exercise the production UI
     // without bookmarks, timers, shared-cache writes or a monitoring database.
-    init(preview: ViewerReading? = nil) {
+    init(preview: ViewerReading? = nil, previewLoader: (([StorageLayer: StorageWindow]) -> ViewerReading)? = nil) {
         if let preview {
-            reading = preview; snapshot = preview.l1; now = preview.l1.generatedAt
+            previewMode = true; self.previewLoader = previewLoader; reading = preview; snapshot = preview.l1; now = preview.l1.generatedAt
             return
         }
         if let data = UserDefaults.standard.data(forKey: sourceKey) {
@@ -38,19 +44,30 @@ final class ViewerModel: ObservableObject {
     }
 
     func refresh(forceWidgetReload: Bool = false) async {
-        guard !refreshing, !selectingSource else { return }
+        guard !selectingSource else { return }
+        guard !refreshing else { pendingRefresh = true; return }
+        if previewMode {
+            if let previewLoader { reading = previewLoader(storageWindows) }
+            return
+        }
         now = Date()
         guard let source else {
             publish(snapshot, forceWidgetReload: forceWidgetReload)
             return
         }
         refreshing = true
-        defer { refreshing = false; now = Date() }
+        defer {
+            refreshing = false; now = Date()
+            if pendingRefresh { pendingRefresh = false; Task { await self.refresh() } }
+        }
         let date = now
+        let windows = storageWindows
+        let revision = storageRevision
         // File access and SQLite never run on the UI thread.
         let result = await Task.detached(priority: .utility) { () -> ViewerReading? in
-            try? DatabaseReader.readAll(source, now: date)
+            try? DatabaseReader.readAll(source, now: date, windows: windows)
         }.value
+        guard revision == storageRevision else { pendingRefresh = true; return }
         if let result {
             reading = result
             snapshot = result.l1
@@ -59,6 +76,20 @@ final class ViewerModel: ObservableObject {
                                   latest: snapshot.latest, status: .unavailable)
         }
         publish(snapshot, forceWidgetReload: forceWidgetReload)
+    }
+
+    func setWindow(_ window: StorageWindow, for layer: StorageLayer) {
+        guard layer.periodDays.contains(window.days) else { return }
+        storageWindows[layer] = window
+        storageRevision += 1
+        Task { await refresh() }
+    }
+
+    func resetStorage() {
+        storageWindows = [.l2: StorageWindow(days: 7), .l3: StorageWindow(days: 3)]
+        resetID += 1
+        storageRevision += 1
+        Task { await refresh() }
     }
 
     private func publish(_ value: L1Snapshot, forceWidgetReload: Bool = false) {
@@ -78,6 +109,10 @@ final class ViewerModel: ObservableObject {
     }
 
     func selectSource() {
+        guard !previewMode else {
+            configurationMessage = "合成データのレビュー版では保存先設定を変更しません。"
+            return
+        }
         guard !refreshing, !selectingSource else { return }
         selectingSource = true
         defer { selectingSource = false }
