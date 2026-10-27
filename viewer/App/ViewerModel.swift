@@ -79,6 +79,7 @@ final class ViewerModel: ObservableObject {
     }
 
     func setWindow(_ window: StorageWindow, for layer: StorageLayer) {
+        guard layer.periodDays.contains(window.days) else { return }
         storageWindows[layer] = window
         storageRevision += 1
         Task { await refresh() }

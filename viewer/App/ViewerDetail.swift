@@ -194,6 +194,7 @@ struct StorageExplorerSection: View {
                         Text(mode.rawValue).frame(maxWidth: .infinity).padding(.vertical, 5)
                             .background(state.mode == mode ? Color.primary.opacity(0.12) : .clear,
                                         in: RoundedRectangle(cornerRadius: 5))
+                            .contentShape(Rectangle())
                     }.buttonStyle(.plain).accessibilityLabel(mode.rawValue)
                         .accessibilityValue(state.mode == mode ? "選択中" : "未選択")
                 }
@@ -255,7 +256,9 @@ struct StorageExplorerSection: View {
                 if next.end == nil { next.end = end }
                 model.setWindow(next, for: layer)
             })) {
-                Text("24時間").tag(1); Text("3日間").tag(3); Text("7日間").tag(7); Text("30日間").tag(30)
+                ForEach(layer.periodDays, id: \.self) { days in
+                    Text(days == 1 ? "24時間" : "\(days)日間").tag(days)
+                }
             }.labelsHidden().frame(width: 84)
             Button("← 前") { model.setWindow(window.moving(-1, now: model.now), for: layer) }
             Button("次 →") { model.setWindow(window.moving(1, now: model.now), for: layer) }.disabled(window.end == nil)

@@ -6,6 +6,7 @@ enum StorageLayer: String, CaseIterable, Sendable {
     var title: String { self == .l2 ? "フォルダ使用量（全体）" : "フォルダ使用量（特定アプリ）" }
     var cadence: String { self == .l2 ? "日次観測" : "毎時観測" }
     var defaultDays: Int { self == .l2 ? 7 : 3 }
+    var periodDays: [Int] { self == .l2 ? [7, 30] : [1, 3, 7, 30] }
 }
 
 struct StorageWindow: Equatable, Sendable {

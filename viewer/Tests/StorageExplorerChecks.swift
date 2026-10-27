@@ -154,6 +154,8 @@ struct StorageExplorerChecks {
         precondition(partialAfter == partialBefore)
     }
     static func extensionChecks() throws {
+        precondition(StorageLayer.l2.periodDays == [7, 30])
+        precondition(StorageLayer.l3.periodDays == [1, 3, 7, 30])
         var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(secondsFromGMT: 0)!
         let end = cal.date(from: DateComponents(year: 2026, month: 4, day: 21, hour: 18, minute: 30))!
         let parent = StorageTarget("/fixture/root/*")
