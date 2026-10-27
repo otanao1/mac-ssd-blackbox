@@ -50,61 +50,21 @@ struct LegendFlow: Layout {
 struct ViewerDetail: View {
     @ObservedObject var model: ViewerModel
     @State private var change = false
-    @State private var selection: Set<String> = []
-    @State private var initialized = false
-    @State private var selectedDate: Date?
-    @State private var expanded: String?
-    @State private var limitMessage = false
-    @State private var innerJump = 0
-    private var data: StorageSnapshot { model.reading?.storage ?? .empty }
-    private var day: StorageDay? {
-        if let selectedDate, let day = data.days.first(where: { $0.date == selectedDate }) { return day }
-        if let latest = data.latest, let day = data.days.first(where: { Calendar.current.isDate($0.date, inSameDayAs: latest.time) }) { return day }
-        return data.days.last
-    }
-    private var ranked: [StorageTarget] { day.map { data.ranking(on: $0) } ?? data.targets }
-    private var maximum: Double { max(0.001, ranked.compactMap { day?.delta(path: $0.path, parent: $0).gib }.map(abs).max() ?? 1) }
-    private var series: [StorageTarget] { data.targets.filter { selection.contains($0.id) }.sorted { $0.path < $1.path } }
-
     var body: some View {
         ScrollViewReader { outer in
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    dashboard { jump(outer, "ranking") }
+                VStack(alignment: .leading, spacing: 18) {
+                    dashboard(outer).id("dashboard")
                     if model.snapshot.status != .ready || !model.snapshot.isCurrent(at: model.now) {
                         Text(model.snapshot.statusText(at: model.now)).font(.caption).foregroundStyle(.secondary)
                     }
                     if let message = model.configurationMessage { Text(message).font(.caption).foregroundStyle(.orange) }
                     if let message = model.sharingMessage { Text(message).font(.caption).foregroundStyle(.orange) }
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Storage Explorer").font(.title3.weight(.semibold))
-                            Spacer()
-                            Text("L2").font(.caption).foregroundStyle(.secondary)
-                            icon("chart.xyaxis.line", "7日間グラフへ") { jump(outer, "daily") }
-                        }.id("ranking")
-                        if let day {
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text("\(dateLabel(day.date)) の増減").font(.headline)
-                                Text(day.previous?.completed == true ? "比較対象は\(dateLabel(day.previous!.time))" : "比較対象なし")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                InfoButton(title: "比較の詳細", message: day.comparisonText)
-                                Spacer(minLength: 0)
-                                Text("\(selection.count)/5系列").font(.caption2).foregroundStyle(.tertiary)
-                            }
-                        }
-                        if limitMessage { Text("最大5系列です。選択中の系列を解除してください。").font(.caption).foregroundStyle(.orange) }
-                        if data.targets.isEmpty { Text("L2の観測記録がありません").font(.callout).foregroundStyle(.secondary) }
-                        else { ranking }
-                        HStack {
-                            Text("日次使用量増減（7日間）").font(.headline)
-                            Spacer()
-                            Text("[GiB]").font(.caption2).foregroundStyle(.secondary)
-                            icon("list.bullet", "ランキングへ") { innerJump += 1; jump(outer, "ranking") }
-                        }.id("daily")
-                        daily.frame(height: 230)
-                        legend
-                    }.padding(.top, 12)
+                    l1(outer).id("L1")
+                    ForEach(StorageLayer.allCases, id: \.self) { layer in
+                        StorageExplorerSection(model: model, layer: layer, back: { jump(outer, "dashboard") }, jumpTo: { jump(outer, $0) })
+                            .id(layer.rawValue)
+                    }
                 }.padding(16)
             }
         }.frame(minWidth: 600, minHeight: 380)
@@ -112,25 +72,66 @@ struct ViewerDetail: View {
             ToolbarItem {
                 Menu {
                     Button("データを更新") { Task { await model.refresh(forceWidgetReload: true) } }
+                    Button("初期表示に戻す") { change = false; model.resetStorage() }
                     Button("設定…") { model.selectSource() }
                 } label: { Image(systemName: "slider.horizontal.3") }
                     .help("更新・設定").accessibilityLabel("更新・設定").disabled(model.refreshing)
             }
         }
-        .onChange(of: data.targets, initial: true) { _, targets in
-            if targets.isEmpty { selection = []; initialized = false; expanded = nil; return }
-            if !initialized && !targets.isEmpty {
-                selection = Set(ranked.prefix(3).map(\.id)); initialized = true
-            } else { selection.formIntersection(Set(targets.map(\.id))) }
-            if let expanded, !targets.contains(where: { $0.id == expanded }) { self.expanded = nil }
+    }
+    private func jump(_ proxy: ScrollViewProxy, _ id: String) {
+        withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) }
+    }
+    private func dashboard(_ outer: ScrollViewProxy) -> some View {
+        StorageDashboard(model: model) { jump(outer, $0) }
+    }
+    private func l1(_ outer: ScrollViewProxy) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("SSD空き容量").font(.headline)
+                Text("1分間隔").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Dashboardへ ↑") { jump(outer, "dashboard") }.buttonStyle(.plain).foregroundStyle(.blue)
+            }
+            Picker("表示", selection: $change) {
+                Text("SSD空き容量").tag(false)
+                Text("空き容量の増減").tag(true)
+            }.pickerStyle(.segmented)
+            HStack {
+                Text("\(StorageMath.stamp(model.now.addingTimeInterval(-86400))) – \(StorageMath.stamp(model.now))")
+                Spacer(); Text("GiB")
+            }.font(.caption2).foregroundStyle(.secondary)
+            L1Chart(samples: (model.reading?.predecessor.map { [$0] } ?? []) + model.snapshot.samples,
+                    now: model.now, lineColor: .orange, midnightOnly: true, showsChanges: change).frame(height: 155)
+        }.padding(14).background(.background, in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(.quaternary))
+    }
+}
+
+struct StorageDashboard: View {
+    @ObservedObject var model: ViewerModel
+    let jumpTo: (String) -> Void
+    var body: some View {
+        let reading = model.reading
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Dashboard").font(.headline)
+                Spacer()
+                Text("最新観測 \(StorageMath.stamp(reading?.latestValid?.time))").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Button { jumpTo("L1") } label: {
+                    card("現在のSSD空き容量", number: reading?.latestValid?.freeBytes.map { String(format: "%.2f GiB", Double($0)/1_073_741_824) } ?? "データなし")
+                }
+                Button { jumpTo("L3") } label: {
+                    card("1時間前からの容量増加", number: reading?.hourComparison.map { StorageMath.signed($0.usageGiB) } ?? "データなし", comparison: reading?.hourComparison)
+                }
+                Button { jumpTo("L2") } label: {
+                    card("24時間前からの容量増加", number: reading?.dayComparison.map { StorageMath.signed($0.usageGiB) } ?? "データなし", comparison: reading?.dayComparison)
+                }
+            }.buttonStyle(.plain)
         }
     }
-    private func jump(_ proxy: ScrollViewProxy, _ id: String) { withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) } }
-    private func icon(_ symbol: String, _ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: symbol).font(.system(size: 14)).frame(width: 28, height: 26).contentShape(Rectangle()) }
-            .buttonStyle(.plain).foregroundStyle(.blue).help(title).accessibilityLabel(title)
-    }
-    private func dateLabel(_ date: Date) -> String { L1DisplayFormat.monthDay(date) }
     private func card(_ title: String, number: String, comparison: L1Comparison? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.system(size: 12)).lineLimit(1).minimumScaleFactor(0.8).frame(maxWidth: .infinity, alignment: .leading)
@@ -147,43 +148,266 @@ struct ViewerDetail: View {
         }.padding(.horizontal, 10).padding(.vertical, 9)
             .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
     }
-    private func dashboard(openL2: @escaping () -> Void) -> some View {
-        let reading = model.reading
-        let latest = reading?.latestValid
-        return VStack(alignment: .leading, spacing: 10) {
+}
+
+struct StorageExplorerSection: View {
+    @ObservedObject var model: ViewerModel
+    let layer: StorageLayer
+    let back: () -> Void
+    let jumpTo: (String) -> Void
+    @State private var state: StorageSelection
+    @State private var limitMessage = false
+    @State private var innerJump = 0
+    init(model: ViewerModel, layer: StorageLayer, back: @escaping () -> Void, jumpTo: @escaping (String) -> Void, initialSelection: StorageSelection? = nil) {
+        self.model = model; self.layer = layer; self.back = back; self.jumpTo = jumpTo
+        _state = State(initialValue: initialSelection ?? StorageSelection(layer: layer))
+    }
+    private var data: StorageSnapshot {
+        guard let reading = model.reading else { return .empty }
+        if let loaded = reading.storageWindows[layer], loaded != window { return .empty }
+        return layer == .l2 ? reading.storage : reading.storageL3
+    }
+    private var window: StorageWindow { model.storageWindows[layer] ?? StorageWindow(days: layer.defaultDays) }
+    private var end: Date { min(window.end ?? model.now, model.now) }
+    private var day: StorageDay? {
+        if let selected = state.selectedDate {
+            return data.days.min { abs($0.date.timeIntervalSince(selected)) < abs($1.date.timeIntervalSince(selected)) }
+        }
+        return data.days.last { $0.current?.completed == true } ?? data.days.last
+    }
+    private var ranked: [StorageTarget] { day.map { data.ranking(on: $0) } ?? data.targets }
+    private var maximum: Double { max(0.001, ranked.compactMap { day?.delta(path: $0.path, parent: $0).gib }.map(abs).max() ?? 1) }
+    private var series: [StorageTarget] { data.targets.filter { state.series.contains($0.id) }.sorted { $0.path < $1.path } }
+    private var singlePath: String? { state.trail.last }
+    private var singleTarget: StorageTarget? { singlePath.map(StorageTarget.init) }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Dashboard").font(.headline)
+                Text(layer.title).font(.headline)
+                Text(layer.cadence).font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Text("最新観測 \(StorageMath.stamp(latest?.time))").font(.system(size: 10)).foregroundStyle(.secondary).monospacedDigit()
+                Button("Dashboardへ ↑", action: back).buttonStyle(.plain).foregroundStyle(.blue)
             }
-            HStack(alignment: .top, spacing: 8) {
-                card("現在のSSD空き容量", number: latest?.freeBytes.map { String(format: "%.2f GiB", Double($0)/1_073_741_824) } ?? "データなし")
-                Button(action: openL2) {
-                    card("24時間前からの容量増加", number: reading?.dayComparison.map { StorageMath.signed($0.usageGiB) } ?? "データなし", comparison: reading?.dayComparison)
-                }.buttonStyle(.plain).help("Storage Explorer（L2）へ")
-                card("1時間前との容量増加", number: reading?.hourComparison.map { StorageMath.signed($0.usageGiB) } ?? "データなし", comparison: reading?.hourComparison)
-                    .help("L3へのリンクは未提供です。")
-            }
-            Text("内蔵SSD 時系列推移（24時間）").font(.system(size: 13, weight: .semibold))
-            HStack(spacing: 8) {
-                ForEach([false, true], id: \.self) { candidate in
-                    Button { change = candidate } label: {
-                        Text(candidate ? "SSD空き容量の増減" : "SSD空き容量").font(.caption).padding(.horizontal, 9).padding(.vertical, 5)
-                            .background(change == candidate ? Color.accentColor.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 5))
-                    }.buttonStyle(.plain)
+            HStack(spacing: 3) {
+                ForEach(StorageMode.allCases, id: \.self) { mode in
+                    Button { state.mode = mode } label: {
+                        Text(mode.rawValue).frame(maxWidth: .infinity).padding(.vertical, 5)
+                            .background(state.mode == mode ? Color.primary.opacity(0.12) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 5))
+                    }.buttonStyle(.plain).accessibilityLabel(mode.rawValue)
+                        .accessibilityValue(state.mode == mode ? "選択中" : "未選択")
                 }
-                Spacer(minLength: 0)
+            }.padding(3).background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            periodControls
+            if state.mode == .single { singleNavigation }
+            HStack {
+                Text(state.mode == .single ? singleTarget?.name ?? "対象なし" : "容量増減").font(.subheadline.weight(.medium))
+                Spacer(); Text("GiB").font(.caption).foregroundStyle(.secondary)
             }
-            VStack(spacing: 4) {
+            plot.frame(height: 230).id("plot-" + layer.rawValue)
+            legend
+            HStack {
+                Text("選択観測：\(StorageMath.stamp(day?.current?.time))").font(.caption)
+                if let day { InfoButton(title: "比較の詳細", message: day.comparisonText) }
+                Spacer()
+                icon("list.bullet", "一覧へ") { innerJump += 1; jumpTo("ranking-" + layer.rawValue) }
+            }
+            if !data.days.contains(where: { $0.current?.completed == true }) {
+                Text("この期間の定期観測データなし\(layer == .l3 ? "（毎時生履歴のみ表示）" : "")")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if state.mode == .single {
+                if let path = singlePath, StoragePlot.points(data.days, path: path, mode: .single).isEmpty {
+                    Text("この対象の有効な容量記録なし").font(.caption).foregroundStyle(.secondary)
+                }
+                singleChildren.id("ranking-" + layer.rawValue)
+            }
+            else {
                 HStack {
-                    Text("\(dateLabel(model.now.addingTimeInterval(-86400))) – \(dateLabel(model.now))").font(.caption2).foregroundStyle(.secondary)
-                    Spacer()
-                    Text("[GiB]").font(.caption2).foregroundStyle(.secondary)
+                    Text("増減ランキング").font(.subheadline.weight(.medium))
+                    Spacer(); Text("\(state.series.count)/5系列").font(.caption)
+                    icon("chart.xyaxis.line", "グラフへ") { jumpTo("plot-" + layer.rawValue) }
                 }
-                L1Chart(samples: (reading?.predecessor.map { [$0] } ?? []) + model.snapshot.samples, now: model.now,
-                        lineColor: .orange, midnightOnly: true, showsChanges: change).frame(height: 155)
+                if limitMessage { Text("最大5系列です。選択中の系列を解除してください。").font(.caption).foregroundStyle(.orange) }
+                ranking.id("ranking-" + layer.rawValue)
+            }
+        }.padding(14).background(.background, in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(.quaternary))
+            .onChange(of: data.targets, initial: true) { _, _ in state.initialize(data) }
+            .onChange(of: model.storageRevision) { _, _ in state.initialize(data) }
+            .onChange(of: model.reading?.l1.generatedAt) { _, _ in state.initialize(data) }
+            .onChange(of: model.resetID) { _, _ in state = StorageSelection(layer: layer); state.initialize(data); limitMessage = false }
+    }
+    private var periodControls: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack { periodText; Spacer(minLength: 4); periodButtons }
+            VStack(alignment: .leading) { periodText; HStack { Spacer(); periodButtons } }
+        }
+    }
+    private var periodText: some View {
+        Text("\(StorageMath.stamp(Calendar.current.date(byAdding: .day, value: -window.days, to: end))) – \(StorageMath.stamp(end))")
+            .font(.system(size: 10)).foregroundStyle(.secondary).monospacedDigit().fixedSize()
+    }
+    private var periodButtons: some View {
+        HStack(spacing: 5) {
+            Picker("期間", selection: Binding(get: { window.days }, set: { days in
+                var next = window; next.days = days
+                if next.end == nil { next.end = end }
+                model.setWindow(next, for: layer)
+            })) {
+                Text("24時間").tag(1); Text("3日間").tag(3); Text("7日間").tag(7); Text("30日間").tag(30)
+            }.labelsHidden().frame(width: 84)
+            Button("← 前") { model.setWindow(window.moving(-1, now: model.now), for: layer) }
+            Button("次 →") { model.setWindow(window.moving(1, now: model.now), for: layer) }.disabled(window.end == nil)
+            Button("最新へ") { model.setWindow(StorageWindow(days: window.days), for: layer) }.disabled(window.end == nil)
+        }.controlSize(.small)
+    }
+    private var singleNavigation: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Picker("監視対象", selection: Binding(get: { state.trail.first ?? "" }, set: { state.trail = [$0] })) {
+                    ForEach(data.targets) { Text($0.name).tag($0.path) }
+                }.frame(maxWidth: 260)
+                Text(singlePath ?? "").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            HStack(alignment: .top) {
+                Button("↑ 親へ") { if state.trail.count > 1 { state.trail.removeLast() } }.disabled(state.trail.count < 2)
+                LegendFlow(spacing: 4) {
+                    ForEach(Array(state.trail.enumerated()), id: \.offset) { index, path in
+                        Button(StorageTarget(path).name + (index < state.trail.count-1 ? " /" : "")) {
+                            state.trail = Array(state.trail.prefix(index+1))
+                        }.buttonStyle(.plain).foregroundStyle(.blue)
+                    }
+                }
+            }.font(.caption)
+        }
+    }
+    private var singleChildren: some View {
+        VStack(alignment: .leading) {
+            if let path = singlePath, let day {
+                StorageChildren(target: StorageTarget(path + "/*"), day: day, single: true,
+                                query: queryBinding(path), page: pageBinding(path)) { state.trail.append($0) }
+            } else { Text("サブフォルダ記録なし").font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+    private func queryBinding(_ path: String) -> Binding<String> {
+        Binding(get: { state.childQueries[path] ?? "" }, set: { state.childQueries[path] = $0 })
+    }
+    private func pageBinding(_ path: String) -> Binding<Int> {
+        Binding(get: { state.childPages[path] ?? 0 }, set: { state.childPages[path] = $0 })
+    }
+    private func icon(_ symbol: String, _ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: symbol).frame(width: 26, height: 24) }
+            .buttonStyle(.plain).foregroundStyle(.blue).help(title).accessibilityLabel(title)
+    }
+    private func dateLabel(_ date: Date) -> String { StorageMath.stamp(date) }
+    private var plottedTargets: [StorageTarget] { state.mode == .single ? singleTarget.map { [$0] } ?? [] : series }
+    private var plot: some View {
+        Chart {
+            RuleMark(y: .value("0 GiB", 0)).foregroundStyle(.secondary.opacity(0.25))
+            if let day { RuleMark(x: .value("選択日時", day.date)).lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(.secondary.opacity(0.5)) }
+            if state.mode == .multi {
+                ForEach(data.days) { day in
+                    if let value = day.usageGiB {
+                        BarMark(x: .value("日時", day.date), y: .value("SSD使用量増減", value), width: .ratio(0.5))
+                            .foregroundStyle(.gray.opacity(0.28))
+                    }
+                }
+            }
+            // All lines first; opaque-backed markers are drawn above every series.
+            ForEach(plottedTargets) { target in
+                ForEach(StoragePlot.segments(data.days, path: target.path, mode: state.mode)) { segment in
+                    ForEach([segment.before, segment.after]) { point in
+                        LineMark(x: .value("日時", point.date), y: .value("GiB", point.value),
+                                 series: .value("区間", target.id + String(segment.id.timeIntervalSince1970)))
+                            .foregroundStyle(plotColor(target.id).opacity(segment.style == .reference ? 0.4 : 1))
+                            .lineStyle(StrokeStyle(lineWidth: segment.style == .incomparable ? 1 : 1.8,
+                                                   lineCap: .round, dash: segment.style == .incomparable ? [1, 4] : []))
+                    }
+                }
+            }
+            ForEach(plottedTargets) { target in
+                ForEach(StoragePlot.points(data.days, path: target.path, mode: state.mode)) { point in
+                    PointMark(x: .value("日時", point.date), y: .value("GiB", point.value))
+                        .foregroundStyle(plotColor(target.id))
+                        .symbol {
+                            if point.partial {
+                                StorageDiamond().fill(.background)
+                                    .overlay(StorageDiamond().stroke(plotColor(target.id), lineWidth: 0.75)).frame(width: 6, height: 6)
+                            } else { Circle().fill(plotColor(target.id)).frame(width: 5, height: 5) }
+                        }
+                        .accessibilityLabel("\(target.name)、\(point.partial ? "一部取得、取得済み容量" : "正常取得")、\(point.reference ? "参考比較" : "")")
+                        .accessibilityValue(String(format: "%.2f GiB", point.value))
+                }
             }
         }
+        .chartXScale(domain: plotDomain)
+        .chartYScale(domain: .automatic(includesZero: true))
+        .chartYAxis { AxisMarks(position: .trailing) }
+        .chartXAxis {
+            AxisMarks(values: axisDates) { axis in
+                if let date = axis.as(Date.self) {
+                    AxisValueLabel(centered: false, anchor: date == axisDates.first ? .topLeading : date == axisDates.last ? .topTrailing : .top) {
+                        VStack(spacing: 0) {
+                            Text(L1DisplayFormat.monthDay(date))
+                            Text(L1DisplayFormat.hourMinute(date))
+                        }.font(.system(size: 10)).monospacedDigit()
+                    }
+                }
+            }
+        }
+
+        .chartLegend(.hidden)
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                Rectangle().fill(.clear).contentShape(Rectangle()).gesture(SpatialTapGesture().onEnded { event in
+                    guard let plot = proxy.plotFrame else { return }
+                    let frame = geometry[plot]
+                    guard frame.contains(event.location), let date: Date = proxy.value(atX: event.location.x-frame.minX) else { return }
+                    state.selectedDate = data.days.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }?.date
+                })
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if state.mode == .multi, let reason = day?.usageReason {
+                InfoButton(title: "SSD使用量増減の欠測理由", message: reason).padding(4)
+            }
+        }
+        .accessibilityLabel(state.mode == .single ? "容量時系列、GiB" : "使用量増減、GiB")
+        .accessibilityAction(named: "前の観測を選択") { moveObservation(-1) }
+        .accessibilityAction(named: "次の観測を選択") { moveObservation(1) }
+    }
+    private var plotDomain: ClosedRange<Date> {
+        let first = data.days.first?.date ?? Calendar.current.date(byAdding: .day, value: -window.days, to: end)!
+        let last = data.days.last?.date ?? end
+        let padding: TimeInterval = layer == .l2 ? 43200 : 1800
+        return first.addingTimeInterval(-padding)...last.addingTimeInterval(padding)
+    }
+    private var axisDates: [Date] {
+        let dates = data.days.map(\.date)
+        guard !dates.isEmpty else { return [] }
+        return Array(Set([0, dates.count/3, dates.count*2/3, dates.count-1])).sorted().map { dates[$0] }
+    }
+    private func moveObservation(_ offset: Int) {
+        guard let date = day?.date, let index = data.days.firstIndex(where: { $0.date == date }) else { return }
+        state.selectedDate = data.days[min(max(index+offset, 0), data.days.count-1)].date
+    }
+    private func plotColor(_ id: String) -> Color { state.mode == .single ? .orange : color(id) }
+    private var legend: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            LegendFlow(spacing: 12) {
+                if state.mode == .multi { Text("▰ SSD使用量増減").foregroundStyle(.secondary) }
+                ForEach(plottedTargets) { target in
+                    HStack(spacing: 5) {
+                        Circle().fill(plotColor(target.id)).frame(width: 5, height: 5)
+                        Text(target.name).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Text("薄い実線：参考比較（取得済み範囲）。点線：比較不可の補助線、途中の値なし。● 正常取得／◇ 一部取得。")
+                .foregroundStyle(.secondary)
+                .help(StorageDelta.referenceExplanation)
+        }.font(.system(size: 10))
     }
     private var ranking: some View {
         ScrollViewReader { inner in
@@ -191,8 +415,8 @@ struct ViewerDetail: View {
                 VStack(spacing: 0) {
                     ForEach(ranked) { target in
                         rankRow(target).id(target.id)
-                        if expanded == target.id, let day {
-                            StorageChildren(target: target, day: day).padding(.horizontal, 14).padding(.vertical, 10)
+                        if state.expanded == target.id, let day {
+                            StorageChildren(target: target, day: day, query: queryBinding(target.path), page: pageBinding(target.path)).padding(.horizontal, 14).padding(.vertical, 10)
                                 .background(Color.primary.opacity(0.025))
                         }
                         Divider()
@@ -204,25 +428,21 @@ struct ViewerDetail: View {
         }
     }
     private func scrollToParent(_ proxy: ScrollViewProxy) {
-        if let id = expanded ?? ranked.first?.id { withAnimation { proxy.scrollTo(id, anchor: .top) } }
+        if let id = state.expanded ?? ranked.first?.id { withAnimation { proxy.scrollTo(id, anchor: .top) } }
     }
     private func color(_ id: String) -> Color {
         [Color.orange, .blue, .purple, .green, .pink][(series.firstIndex(where: { $0.id == id }) ?? 0) % 5]
     }
-    private func toggle(_ id: String) {
-        if selection.contains(id) { selection.remove(id); limitMessage = false }
-        else if selection.count < 5 { selection.insert(id); limitMessage = false }
-        else { limitMessage = true }
-    }
+    private func toggle(_ id: String) { limitMessage = !state.toggle(id) }
     private func rankRow(_ target: StorageTarget) -> some View {
         let delta = day?.delta(path: target.path, parent: target) ?? .missing("定期観測なし")
         let children = day?.children(target) ?? []
-        let capacity = data.latest?.results[target.path]
-        let capacityText = capacity?.usable == true ? String(format: "%.2f GiB", Double(capacity!.bytes!)/1_073_741_824) : "—"
+        let capacity = day?.capacity(target.path)
+        let capacityText = capacity.flatMap { row in row.bytes.map { (row.status == "partial" ? "取得済み " : "") + String(format: "%.2f GiB", Double($0)/1_073_741_824) } } ?? "—"
         return HStack(spacing: 7) {
             Button { toggle(target.id) } label: {
-                Image(systemName: selection.contains(target.id) ? "checkmark.square.fill" : "square").font(.system(size: 12))
-                    .foregroundStyle(selection.contains(target.id) ? color(target.id) : .secondary).frame(width: 18, height: 26)
+                Image(systemName: state.series.contains(target.id) ? "checkmark.square.fill" : "square").font(.system(size: 12))
+                    .foregroundStyle(state.series.contains(target.id) ? color(target.id) : .secondary).frame(width: 18, height: 26)
             }.buttonStyle(.plain).accessibilityLabel("\(target.name)の系列を切替")
             VStack(spacing: 2) {
                 HStack(spacing: 5) {
@@ -232,7 +452,7 @@ struct ViewerDetail: View {
                             Text(target.path).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                                 .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
                         }.contentShape(Rectangle())
-                    }.buttonStyle(.plain).foregroundStyle(.primary).help("\(target.path)\n現在容量：\(capacityText)")
+                    }.buttonStyle(.plain).foregroundStyle(.primary).help("\(target.path)\n選択観測の容量：\(capacityText)")
                     HStack(spacing: 3) {
                         Text(delta.displayText).font(.system(size: 12, weight: .medium)).monospacedDigit()
                         if let reason = delta.explanation { InfoButton(title: delta.isReference ? "参考差分について" : "比較できない理由", message: reason) }
@@ -240,10 +460,10 @@ struct ViewerDetail: View {
                 }
                 rankBar(delta.gib).opacity(delta.isReference ? 0.45 : 1).frame(height: 3)
             }
-            Button { expanded = expanded == target.id ? nil : target.id } label: {
+            Button { state.expanded = state.expanded == target.id ? nil : target.id } label: {
                 HStack(spacing: 3) {
-                    Text(target.includesChildren ? (children.isEmpty && day?.current?.completed != true ? "—" : "\(children.count)件") : "—").font(.system(size: 10)).monospacedDigit()
-                    Image(systemName: expanded == target.id ? "chevron.down" : "chevron.right").font(.system(size: 9))
+                    Text(target.includesChildren ? (children.isEmpty ? "—" : "\(children.count)件") : "—").font(.system(size: 10)).monospacedDigit()
+                    Image(systemName: state.expanded == target.id ? "chevron.down" : "chevron.right").font(.system(size: 9))
                 }.foregroundStyle(.secondary).frame(width: 48, height: 26, alignment: .trailing)
             }.buttonStyle(.plain).disabled(!target.includesChildren).accessibilityLabel("\(target.name)の子項目")
         }.padding(.horizontal, 8).padding(.vertical, 4)
@@ -258,135 +478,69 @@ struct ViewerDetail: View {
             }
         }
     }
-    private struct DailyPoint: Identifiable {
-        let date: Date
-        let value: Double
-        let segment: Int
-        let isReference: Bool
-        var id: Date { date }
-    }
-    private func points(_ target: StorageTarget) -> [DailyPoint] {
-        var segment = 0
-        var wasReference: Bool?
-        return data.days.compactMap { day in
-            let delta = day.delta(path: target.path, parent: target)
-            guard let value = delta.gib else { segment += 1; return nil }
-            if let wasReference, wasReference != delta.isReference { segment += 1 }
-            wasReference = delta.isReference
-            return DailyPoint(date: day.date, value: value, segment: segment, isReference: delta.isReference)
-        }
-    }
-    private var daily: some View {
-        let dates = data.days.map(\.date)
-        let start = dates.first ?? Calendar.current.startOfDay(for: model.now.addingTimeInterval(-6*86400))
-        let end = dates.last ?? model.now
-        return Chart {
-            ForEach(dates, id: \.self) { date in
-                RuleMark(x: .value("日付", date)).lineStyle(StrokeStyle(lineWidth: 0.5, dash: [3, 3])).foregroundStyle(Color.secondary.opacity(0.3))
-            }
-            RuleMark(y: .value("0 GiB", 0)).foregroundStyle(Color.secondary.opacity(0.5))
-            if let day { RuleMark(x: .value("選択日", day.date)).lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.secondary.opacity(0.7)) }
-            ForEach(data.days) { day in
-                if let value = day.usageGiB {
-                    BarMark(x: .value("日付", day.date), y: .value("SSD使用量増減", value), width: .fixed(25)).foregroundStyle(.gray.opacity(0.28))
-                }
-            }
-            ForEach(series) { target in
-                ForEach(points(target)) { point in
-                    LineMark(x: .value("日付", point.date), y: .value("GiB", point.value), series: .value("区間", "\(target.id)-\(point.segment)"))
-                        .foregroundStyle(color(target.id)).lineStyle(StrokeStyle(lineWidth: 2, dash: point.isReference ? [4, 3] : []))
-                    PointMark(x: .value("日付", point.date), y: .value("GiB", point.value)).foregroundStyle(color(target.id)).symbol(point.isReference ? .square : .circle).symbolSize(24)
-                        .accessibilityLabel("\(target.name)、\(point.isReference ? "取得済み範囲の参考差分。未取得領域の増減は不明" : "通常差分")")
-                        .accessibilityValue(StorageMath.signed(point.value))
-                }
-            }
-        }.chartXScale(domain: start.addingTimeInterval(-43200)...end.addingTimeInterval(43200))
-            .chartYScale(domain: .automatic(includesZero: true))
-            .chartYAxis { AxisMarks(position: .trailing) }
-            .chartXAxis { AxisMarks(values: dates) { axis in
-                AxisValueLabel(centered: false, anchor: .top, collisionResolution: .disabled) {
-                    if let date = axis.as(Date.self) { Text(dateLabel(date)).font(.caption2).fontWeight(day?.date == date ? .bold : .regular).monospacedDigit() }
-                }
-            } }
-            .chartLegend(.hidden)
-            .safeAreaInset(edge: .bottom, spacing: 2) { Text("破線・■：取得済み範囲の参考差分（未取得領域の増減は不明）").font(.caption2).foregroundStyle(.secondary) }
-            .help("参考差分は破線・四角の点。" + StorageDelta.referenceExplanation)
-            .chartOverlay { proxy in
-                GeometryReader { geometry in
-                    Rectangle().fill(.clear).contentShape(Rectangle()).gesture(SpatialTapGesture().onEnded { event in
-                        guard let plot = proxy.plotFrame else { return }
-                        let frame = geometry[plot]
-                        guard frame.contains(event.location), let date: Date = proxy.value(atX: event.location.x-frame.minX) else { return }
-                        selectedDate = dates.min { abs($0.timeIntervalSince(date)) < abs($1.timeIntervalSince(date)) }
-                    })
-                }
-            }
-            .overlay(alignment: .topLeading) {
-                if let reason = day?.usageReason {
-                    InfoButton(title: "SSD使用量増減の欠測理由", message: reason).padding(4)
-                }
-            }
-            .accessibilityLabel("7日間の使用量増減、GiB")
-            .accessibilityAction(named: "前の日を選択") { moveDay(-1) }
-            .accessibilityAction(named: "次の日を選択") { moveDay(1) }
-    }
-    private func moveDay(_ offset: Int) {
-        guard let date = day?.date, let index = data.days.firstIndex(where: { $0.date == date }) else { return }
-        selectedDate = data.days[min(max(index+offset, 0), data.days.count-1)].date
-    }
-    private var legend: some View {
-        LegendFlow(spacing: 12) {
-            HStack(spacing: 5) {
-                Rectangle().fill(.gray.opacity(0.5)).frame(width: 14, height: 8)
-                Text("SSD使用量増減").foregroundStyle(.secondary)
-            }.fixedSize()
-            ForEach(series) { target in
-                HStack(spacing: 5) {
-                    ZStack {
-                        Rectangle().fill(color(target.id)).frame(width: 16, height: 2)
-                        Circle().fill(color(target.id)).frame(width: 5, height: 5)
-                    }.frame(width: 16, height: 8)
-                    Text(target.name).foregroundStyle(.secondary)
-                }.fixedSize()
-            }
-        }.font(.system(size: 10)).padding(.vertical, 6)
-    }
+
 }
 
 private struct StorageChildren: View {
     let target: StorageTarget
     let day: StorageDay
-    @State private var query = ""
-    @State private var page = 0
-    private var children: [StorageChild] { day.children(target) }
+    var single = false
+    @Binding var query: String
+    @Binding var page: Int
+    var open: ((String) -> Void)? = nil
+    private var children: [StorageChild] {
+        single ? day.subfolders(target.path).map { StorageChild(path: $0.path, delta: day.comparison($0.path)) } : day.children(target)
+    }
     private var filtered: [StorageChild] { children.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) } }
     private var pageCount: Int { max(1, (filtered.count+9)/10) }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("\(target.name)の子項目").font(.system(size: 12, weight: .medium))
-            HStack(spacing: 8) {
-                TextField("子項目をフィルタ", text: $query).textFieldStyle(.plain).font(.system(size: 12))
-                Text("\(filtered.count) / \(children.count)件").font(.system(size: 10)).monospacedDigit().foregroundStyle(.tertiary)
-            }.padding(.horizontal, 9).padding(.vertical, 6)
-                .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5))
-                .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
+            Text("\(target.name)のサブフォルダ").font(.system(size: 12, weight: .medium))
+            if !children.isEmpty {
+                HStack(spacing: 8) {
+                    TextField("子項目をフィルタ", text: $query).textFieldStyle(.plain).font(.system(size: 12))
+                    Text("\(filtered.count) / \(children.count)件").font(.system(size: 10)).monospacedDigit().foregroundStyle(.tertiary)
+                }.padding(.horizontal, 9).padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5))
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
+            }
             ForEach(Array(filtered.dropFirst(min(page, pageCount-1)*10).prefix(10))) { child in
                 HStack {
                     Text(child.name).lineLimit(1).truncationMode(.middle).help(child.path)
                     Spacer()
+                    if single, let row = day.capacity(child.path), let bytes = row.bytes {
+                        Text((row.status == "partial" ? "取得済み " : "") + String(format: "%.2f GiB", Double(bytes)/1_073_741_824)).monospacedDigit()
+                    }
                     Text(child.delta.displayText).monospacedDigit()
                     if let reason = child.delta.explanation { InfoButton(title: child.delta.isReference ? "参考差分について" : "比較できない理由", message: reason) }
                     else { Color.clear.frame(width: 14, height: 14) }
+                    if single {
+                        Button("開く →") { open?(child.path) }
+                            .disabled(day.capacity(child.path)?.kind != "directory")
+                    }
                 }.font(.system(size: 12)).frame(height: 20)
             }
-            if filtered.isEmpty { Text(children.isEmpty ? "子項目の記録がありません" : "一致する子項目がありません").font(.caption).foregroundStyle(.secondary) }
-            HStack(spacing: 12) {
-                Spacer()
-                Button("前へ") { page = max(0, page-1) }.disabled(page == 0)
-                Text("\(min(page+1, pageCount)) / \(pageCount)").monospacedDigit().foregroundStyle(.secondary)
-                Button("次へ") { page += 1 }.disabled(page+1 >= pageCount)
-            }.buttonStyle(.plain).font(.system(size: 10)).padding(.top, 3)
+            if filtered.isEmpty { Text(children.isEmpty ? "サブフォルダ記録なし" : "一致する子項目がありません").font(.caption).foregroundStyle(.secondary) }
+            if !children.isEmpty {
+                HStack(spacing: 12) {
+                    Spacer()
+                    Button("前へ") { page = max(0, page-1) }.disabled(page == 0)
+                    Text("\(min(page+1, pageCount)) / \(pageCount)").monospacedDigit().foregroundStyle(.secondary)
+                    Button("次へ") { page += 1 }.disabled(page+1 >= pageCount)
+                }.buttonStyle(.plain).font(.system(size: 10)).padding(.top, 3)
+            }
         }.onChange(of: query) { _, _ in page = 0 }
             .onChange(of: day.date) { _, _ in page = 0 }
+    }
+}
+
+private struct StorageDiamond: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path { p in
+            p.move(to: CGPoint(x: rect.midX, y: rect.minY))
+            p.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+            p.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+            p.addLine(to: CGPoint(x: rect.minX, y: rect.midY)); p.closeSubpath()
+        }
     }
 }

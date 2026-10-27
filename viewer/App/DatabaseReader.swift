@@ -45,7 +45,7 @@ enum DatabaseReader {
         try readAll(source, now: now).l1
     }
 
-    static func readAll(_ source: DatabaseSource, now: Date) throws -> ViewerReading {
+    static func readAll(_ source: DatabaseSource, now: Date, windows: [StorageLayer: StorageWindow] = [:]) throws -> ViewerReading {
         var stale = false
         let folder = try URL(resolvingBookmarkData: source.bookmark, options: [.withSecurityScope, .withoutUI],
                              relativeTo: nil, bookmarkDataIsStale: &stale)
@@ -53,7 +53,7 @@ enum DatabaseReader {
         defer { folder.stopAccessingSecurityScopedResource() }
         let url = try validate(folder, identity: source.identity)
         return try withReadOnlyConnection(url) { db in
-            let result = try readConnected(db, now: now)
+            let result = try readConnected(db, now: now, windows: windows)
             _ = try validate(folder, identity: source.identity)
             return result
         }
@@ -112,7 +112,7 @@ enum DatabaseReader {
         return try query(db, "SELECT time,free,error FROM l1 WHERE path=? AND time>=? AND time<=? AND free>=0 AND error IS NULL ORDER BY abs(time-?),time LIMIT 1",
                          [.string(path), .number(epoch-90), .number(min(epoch+90, now.timeIntervalSince1970)), .number(epoch)], row: sample).first
     }
-    static func readConnected(_ db: OpaquePointer, now: Date, calendar: Calendar = .current) throws -> ViewerReading {
+    static func readConnected(_ db: OpaquePointer, now: Date, calendar: Calendar = .current, windows: [StorageLayer: StorageWindow] = [:]) throws -> ViewerReading {
         let latestRows = try query(db, "SELECT time,free,error,path FROM l1 WHERE time<=? ORDER BY time DESC LIMIT 1", [.number(now.timeIntervalSince1970)]) { statement in
             (sample(statement), try string(statement, 3))
         }
@@ -127,18 +127,30 @@ enum DatabaseReader {
             guard let latestValid, let previous = try nearest(db, path: path, time: latestValid.time.addingTimeInterval(Double(-hours)*3600), now: now) else { return nil }
             return L1Comparison(latest: latestValid, previous: previous)
         }
-        let targets: [StorageTarget] = try query(db, "SELECT targets FROM scans WHERE layer='L2' AND created<=? ORDER BY CASE WHEN trigger='periodic' THEN 0 ELSE 1 END,created DESC,id DESC LIMIT 1", [.number(now.timeIntervalSince1970)]) { statement in
+        let storage = try readStorage(db, layer: .l2, window: windows[.l2] ?? StorageWindow(days: 7),
+                                      l1Path: path, now: now, calendar: calendar)
+        let storageL3 = try readStorage(db, layer: .l3, window: windows[.l3] ?? StorageWindow(days: 3),
+                                        l1Path: path, now: now, calendar: calendar)
+        return try ViewerReading(l1: L1Snapshot(version: 1, generatedAt: now, samples: samples, latest: latest, status: .ready),
+                                 latestValid: latestValid, dayComparison: comparison(24), hourComparison: comparison(1),
+                                 predecessor: predecessor, storage: storage, storageL3: storageL3, storageWindows: [.l2: windows[.l2] ?? StorageWindow(days: 7), .l3: windows[.l3] ?? StorageWindow(days: 3)])
+    }
+    private static func readStorage(_ db: OpaquePointer, layer: StorageLayer, window: StorageWindow,
+                                    l1Path: String, now: Date, calendar: Calendar) throws -> StorageSnapshot {
+        let targets: [StorageTarget] = try query(db, "SELECT targets FROM scans WHERE layer=? AND created<=? ORDER BY CASE WHEN trigger='periodic' THEN 0 ELSE 1 END,created DESC,id DESC LIMIT 1", [.string(layer.rawValue), .number(now.timeIntervalSince1970)]) { statement in
             try JSONDecoder().decode([String].self, from: Data(string(statement, 0).utf8)).map(StorageTarget.init)
         }.first ?? []
-        let since = calendar.date(byAdding: .day, value: -7, to: calendar.startOfDay(for: now))!
-        var scans = try query(db, "SELECT id,coalesce(started,created),state,scan_version,targets FROM scans WHERE layer='L2' AND trigger='periodic' AND coalesce(started,created)>=? AND coalesce(started,created)<=? ORDER BY coalesce(started,created),id",
-                              [.number(since.timeIntervalSince1970), .number(now.timeIntervalSince1970)]) { statement in
+        let end = min(window.end ?? now, now)
+        let last = calendar.dateInterval(of: layer.component, for: end)!.start
+        let since = calendar.date(byAdding: .day, value: -window.days, to: last)!
+        var scans = try query(db, "SELECT id,coalesce(started,created),state,scan_version,targets FROM scans WHERE layer=? AND trigger='periodic' AND coalesce(started,created)>=? AND coalesce(started,created)<=? ORDER BY coalesce(started,created),id",
+                              [.string(layer.rawValue), .number(since.timeIntervalSince1970), .number(end.timeIntervalSince1970)]) { statement in
             StorageScan(id: try string(statement, 0), time: Date(timeIntervalSince1970: sqlite3_column_double(statement, 1)),
                         state: try string(statement, 2), version: Int(sqlite3_column_int(statement, 3)),
                         targets: try JSONDecoder().decode([String].self, from: Data(string(statement, 4).utf8)).map(StorageTarget.init), results: [:])
         }
-        // Only representative daily scans need their results. Skip in-progress/failed rows.
-        let representativeIDs = Set(Dictionary(grouping: scans, by: { calendar.startOfDay(for: $0.time) }).values.compactMap { $0.last?.id })
+        // Only representative day/hour scans need results. Keep failed/pending representatives as gaps.
+        let representativeIDs = Set(Dictionary(grouping: scans, by: { calendar.dateInterval(of: layer.component, for: $0.time)!.start }).values.compactMap { $0.last?.id })
         var anchors: [L1Sample] = []
         for index in scans.indices where representativeIDs.contains(scans[index].id) && scans[index].completed {
             let results = try query(db, "SELECT path,kind,bytes,status,error FROM results WHERE scan_id=?", [.string(scans[index].id)]) { statement in
@@ -151,15 +163,13 @@ enum DatabaseReader {
                     scans[index].results[result.path] = StorageResult(path: result.path, kind: "unknown", bytes: nil, status: "ambiguous")
                 } else { scans[index].results[result.path] = result }
             }
-            if let anchor = try nearest(db, path: path, time: scans[index].time, now: now) { anchors.append(anchor) }
+            if let anchor = try nearest(db, path: l1Path, time: scans[index].time, now: now) { anchors.append(anchor) }
         }
         // Observation targets are taken from the recorded effective target list, not a new scan/config edit.
         let uniqueTargets = Dictionary(grouping: targets, by: \.path).values.compactMap { group in
             group.first(where: \.includesChildren) ?? group.first
         }.sorted { $0.path < $1.path }
-        let storage = StorageSnapshot.make(targets: uniqueTargets, scans: scans, l1: anchors, now: now, calendar: calendar)
-        return try ViewerReading(l1: L1Snapshot(version: 1, generatedAt: now, samples: samples, latest: latest, status: .ready),
-                                 latestValid: latestValid, dayComparison: comparison(24), hourComparison: comparison(1),
-                                 predecessor: predecessor, storage: storage)
+        return StorageSnapshot.make(targets: uniqueTargets, scans: scans, l1: anchors, now: now, calendar: calendar, layer: layer, window: window)
     }
+
 }

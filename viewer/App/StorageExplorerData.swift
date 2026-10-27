@@ -1,5 +1,55 @@
 import Foundation
 
+enum StorageLayer: String, CaseIterable, Sendable {
+    case l3 = "L3", l2 = "L2"
+    var component: Calendar.Component { self == .l2 ? .day : .hour }
+    var title: String { self == .l2 ? "フォルダ使用量（全体）" : "フォルダ使用量（特定アプリ）" }
+    var cadence: String { self == .l2 ? "日次観測" : "毎時観測" }
+    var defaultDays: Int { self == .l2 ? 7 : 3 }
+}
+
+struct StorageWindow: Equatable, Sendable {
+    var days: Int
+    var end: Date? = nil // nil follows the latest period; never persisted.
+    func moving(_ direction: Int, now: Date, calendar: Calendar = .current) -> StorageWindow {
+        let candidate = calendar.date(byAdding: .day, value: days * direction, to: end ?? now)!
+        return StorageWindow(days: days, end: candidate >= now ? nil : candidate)
+    }
+}
+
+enum StorageMode: String, CaseIterable { case single = "Single", multi = "Multi" }
+
+struct StorageSelection {
+    var mode: StorageMode
+    var series: Set<String> = []
+    var initialized = false
+    var selectedDate: Date?
+    var trail: [String] = []
+    var expanded: String?
+    var childQueries: [String: String] = [:]
+    var childPages: [String: Int] = [:]
+    init(layer: StorageLayer) { mode = layer == .l2 ? .multi : .single }
+    mutating func initialize(_ data: StorageSnapshot) {
+        guard !data.targets.isEmpty else { return }
+        if initialized {
+            let valid = Set(data.targets.map(\.id))
+            series.formIntersection(valid)
+            if let root = trail.first, !valid.contains(root) { trail = [data.targets[0].path] }
+            if let id = expanded, !valid.contains(id) { expanded = nil }
+            return
+        }
+        let day = data.days.last { $0.current?.completed == true } ?? data.days.last
+        series = Set((day.map { data.ranking(on: $0) } ?? data.targets).prefix(3).map(\.id))
+        trail = data.targets.first.map { [$0.path] } ?? []
+        initialized = true
+    }
+    mutating func toggle(_ id: String) -> Bool {
+        if series.contains(id) { series.remove(id); return true }
+        guard series.count < 5 else { return false }
+        series.insert(id); return true
+    }
+}
+
 struct L1Comparison: Sendable {
     let latest: L1Sample
     let previous: L1Sample
@@ -97,22 +147,48 @@ struct StorageDay: Identifiable, Sendable {
     let previousL1: L1Sample?
     let currentL1: L1Sample?
     var id: Date { date }
+    // Only explicit targets and their recorded immediate children are capacity
+    // observations. Deep failure diagnostics do not prove a recorded subtree.
+    func sourceTarget(for path: String, in scan: StorageScan?) -> StorageTarget? {
+        guard let scan else { return nil }
+        return scan.targets.first { $0.path == path }
+            ?? scan.targets.first { $0.includesChildren && (path as NSString).deletingLastPathComponent == $0.path }
+    }
+    func capacity(_ path: String) -> StorageResult? {
+        guard let current, current.completed, sourceTarget(for: path, in: current) != nil,
+              let row = current.results[path], ["ok", "partial"].contains(row.status),
+              let bytes = row.bytes, bytes >= 0 else { return nil }
+        return row
+    }
+    func comparison(_ path: String) -> StorageDelta {
+        guard let target = sourceTarget(for: path, in: current) ?? sourceTarget(for: path, in: previous) else {
+            return .missing("監視対象または記録済みの子項目ではありません")
+        }
+        return delta(path: path, parent: target)
+    }
+    func subfolders(_ path: String) -> [StorageResult] {
+        guard let current, current.completed,
+              current.targets.contains(where: { $0.path == path && $0.includesChildren }) else { return [] }
+        return current.results.values.filter {
+            ($0.path as NSString).deletingLastPathComponent == path
+        }.sorted { ($0.bytes ?? -1) == ($1.bytes ?? -1) ? $0.path < $1.path : ($0.bytes ?? -1) > ($1.bytes ?? -1) }
+    }
     var usageGiB: Double? {
         guard previous?.completed == true, current?.completed == true,
               let a = previousL1?.freeBytes, let b = currentL1?.freeBytes else { return nil }
         return Double(a - b) / 1_073_741_824
     }
     var usageReason: String? {
-        if previous?.completed != true { return "前日の有効な定期観測なし" }
-        if current?.completed != true { return "この日の有効な定期観測なし" }
-        return usageGiB == nil ? "L2観測時刻の±90秒以内に有効なL1観測なし" : nil
+        if previous?.completed != true { return "比較元の有効な定期観測なし" }
+        if current?.completed != true { return "比較先の有効な定期観測なし" }
+        return usageGiB == nil ? "定期観測時刻の±90秒以内に有効なL1観測なし" : nil
     }
     var comparisonText: String {
         "比較元：\(StorageMath.stamp(previous?.completed == true ? previous?.time : nil))\n比較先：\(StorageMath.stamp(current?.completed == true ? current?.time : nil))"
     }
     func delta(path: String, parent: StorageTarget) -> StorageDelta {
-        guard let current, current.completed else { return .missing("この日の有効な定期観測なし") }
-        guard let previous, previous.completed else { return .missing("前日の有効な定期観測なし") }
+        guard let current, current.completed else { return .missing("比較先の有効な定期観測なし") }
+        guard let previous, previous.completed else { return .missing("比較元の有効な定期観測なし") }
         guard previous.targets.contains(where: { $0.path == parent.path }), current.targets.contains(where: { $0.path == parent.path }) else {
             return .missing("比較する観測で監視対象が異なります")
         }
@@ -179,20 +255,30 @@ struct StorageSnapshot: Sendable {
             return x == y ? a.path < b.path : (x ?? -.infinity) > (y ?? -.infinity)
         }
     }
-    static func make(targets: [StorageTarget], scans: [StorageScan], l1: [L1Sample], now: Date, calendar: Calendar = .current) -> StorageSnapshot {
-        let today = calendar.startOfDay(for: now)
-        let byDay = Dictionary(grouping: scans.filter { $0.time <= now }, by: { calendar.startOfDay(for: $0.time) })
-            .mapValues { $0.max { a, b in a.time == b.time ? a.id < b.id : a.time < b.time }! }
-        let days = (-6...0).map { offset -> StorageDay in
-            let date = calendar.date(byAdding: .day, value: offset, to: today)!
-            let before = calendar.date(byAdding: .day, value: -1, to: date)!
-            let a = byDay[before], b = byDay[date]
-            return StorageDay(date: date, previous: a, current: b,
-                              previousL1: a.flatMap { StorageMath.nearest(l1, to: $0.time) },
-                              currentL1: b.flatMap { StorageMath.nearest(l1, to: $0.time) })
+    static func make(targets: [StorageTarget], scans: [StorageScan], l1: [L1Sample], now: Date,
+                     calendar: Calendar = .current, layer: StorageLayer = .l2,
+                     window: StorageWindow = StorageWindow(days: 7)) -> StorageSnapshot {
+        let end = min(window.end ?? now, now)
+        let component = layer.component
+        let last = calendar.dateInterval(of: component, for: end)!.start
+        let start = calendar.date(byAdding: .day, value: -window.days, to: last)!
+        let bySlot = Dictionary(grouping: scans.filter { $0.time <= end }, by: {
+            calendar.dateInterval(of: component, for: $0.time)!.start
+        }).mapValues { $0.max { a, b in a.time == b.time ? a.id < b.id : a.time < b.time }! }
+        var days: [StorageDay] = []
+        var slot = calendar.date(byAdding: component, value: 1, to: start)!
+        while slot <= last {
+            let before = calendar.date(byAdding: component, value: -1, to: slot)!
+            let a = bySlot[before], b = bySlot[slot]
+            days.append(StorageDay(date: slot, previous: a, current: b,
+                                   previousL1: a.flatMap { StorageMath.nearest(l1, to: $0.time) },
+                                   currentL1: b.flatMap { StorageMath.nearest(l1, to: $0.time) }))
+            slot = calendar.date(byAdding: component, value: 1, to: slot)!
         }
-        return StorageSnapshot(targets: targets, days: days, latest: scans.filter(\.completed).max { $0.time < $1.time })
+        return StorageSnapshot(targets: targets, days: days,
+                               latest: days.compactMap(\.current).filter(\.completed).max { $0.time < $1.time })
     }
+
 }
 struct ViewerReading: Sendable {
     let l1: L1Snapshot
@@ -201,4 +287,49 @@ struct ViewerReading: Sendable {
     let hourComparison: L1Comparison?
     let predecessor: L1Sample?
     let storage: StorageSnapshot
+    var storageL3: StorageSnapshot = .empty
+    var storageWindows: [StorageLayer: StorageWindow] = [:]
+}
+
+struct StoragePlotPoint: Identifiable {
+    let date: Date
+    let value: Double
+    let partial: Bool
+    let reference: Bool
+    var id: Date { date }
+}
+enum StorageLineStyle { case normal, reference, incomparable }
+struct StoragePlotSegment: Identifiable {
+    let before: StoragePlotPoint
+    let after: StoragePlotPoint
+    let style: StorageLineStyle
+    var id: Date { after.date }
+}
+enum StoragePlot {
+    static func points(_ days: [StorageDay], path: String, mode: StorageMode) -> [StoragePlotPoint] {
+        days.compactMap { day in
+            let delta = day.comparison(path)
+            if mode == .single {
+                guard let row = day.capacity(path), let bytes = row.bytes else { return nil }
+                return StoragePlotPoint(date: day.date, value: Double(bytes)/1_073_741_824,
+                                        partial: row.status == "partial", reference: delta.isReference)
+            }
+            guard let value = delta.gib else { return nil }
+            return StoragePlotPoint(date: day.date, value: value,
+                                    partial: day.current?.results[path]?.status == "partial", reference: delta.isReference)
+        }
+    }
+    static func segments(_ days: [StorageDay], path: String, mode: StorageMode) -> [StoragePlotSegment] {
+        let points = points(days, path: path, mode: mode)
+        let indices = Dictionary(uniqueKeysWithValues: days.enumerated().map { ($0.element.date, $0.offset) })
+        return zip(points, points.dropFirst()).map { a, b in
+            let index = indices[b.date]!
+            let adjacent = index == indices[a.date]! + 1
+            let delta = days[index].comparison(path)
+            let style: StorageLineStyle
+            if !adjacent || delta.gib == nil || (mode == .multi && a.reference != b.reference) { style = .incomparable }
+            else { style = delta.isReference ? .reference : .normal }
+            return StoragePlotSegment(before: a, after: b, style: style)
+        }
+    }
 }
