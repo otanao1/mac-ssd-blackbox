@@ -108,6 +108,10 @@ final class ViewerModel: ObservableObject {
     }
 
     func selectSource() {
+        guard !previewMode else {
+            configurationMessage = "合成データのレビュー版では保存先設定を変更しません。"
+            return
+        }
         guard !refreshing, !selectingSource else { return }
         selectingSource = true
         defer { selectingSource = false }

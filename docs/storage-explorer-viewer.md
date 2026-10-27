@@ -57,6 +57,17 @@ local/issue31/RenderStorageExplorer local/issue31
 
 実GUIで操作する場合は同じ本番ソースとfixtureに `StorageExplorerGUIReview.swift` を組み合わせる（RenderStorageExplorerと同時に@mainを含めない）。正式Viewerの起動・登録・配置は行わない。
 
+### 合成GUIレビュー版の準備・起動
+
+```sh
+sh viewer/Tests/prepare-storage-explorer-review.sh
+open local/issue31/GUIReview/StorageExplorerReview.app
+```
+
+本番とは別ID `io.github.otanao1.blackbox-viewer.issue31-review`、App Group・本番entitlements・Widget・App delegateなしで、本番Viewと合成previewモデルを動かす。既存署名や正式配置を変更しない。「設定…」は合成モードで実DB選択に進まず、更新も合成データだけを再生成する。終了時も本番のWidget終了状態を書かない。再現用fixtureの基準時刻は2026/04/21 18:00で、実際の現在時刻ではない。
+
+カードのジャンプ、L2／L3 × Single／Multi、期間選択・前後／最新移動、グラフの観測選択、ユーザーライブラリ→Application Supportのドリルダウンと親／パンくず、Multiの5系列上限・子検索／ページ、「初期表示に戻す」を確認する。検証成果物はユーザーの受入完了まで保持する。
+
 ## 過去の検証記録（#22）
 
 - Python 3.11の既存テスト138件。
