@@ -69,6 +69,103 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn('occurred_at', self.payload())
 
 
+    def test_wrapped_timeout_keeps_operation_without_private_command_or_output(self):
+        secret = 'NEVER_PUBLIC_SECRET'
+        cause = subprocess.TimeoutExpired(['/private/'+secret], 10,
+                                          output=secret.encode(), stderr=secret.encode())
+        outer = OSError(secret)
+        outer.__cause__ = cause
+        diagnostics.mark_operation(cause, 'volume_diskutil')
+        diagnostics.mark_operation(outer, 'storage_identity')
+        diagnostics.emit('worker_start_failed', error=outer, stage='initialize',
+                         operation='store_initialize', scan_id=IDENT)
+        payload = self.payload()
+        self.assertEqual(payload['operation'], 'volume_diskutil')
+        self.assertEqual(payload['exception_type'], 'OSError')
+        self.assertEqual(payload['cause_type'], 'TimeoutExpired')
+        self.assertEqual(payload['timeout_seconds'], 10)
+        self.assertNotIn('returncode', payload)
+        self.assertNotIn('errno', payload)
+        self.assertNotIn(secret, str(self.runner.call_args))
+        self.runner.assert_called_once()
+
+    def test_exit_status_and_cause_errno_are_not_confused_with_outer_errno(self):
+        for code in (1, -9):
+            with self.subTest(returncode=code):
+                cause = subprocess.CalledProcessError(code, ['/private/NEVER_PUBLIC'],
+                                                     output=b'NEVER_PUBLIC', stderr=b'NEVER_PUBLIC')
+                outer = OSError('NEVER_PUBLIC'); outer.__cause__ = cause
+                diagnostics.emit('worker_start_failed', error=outer, operation='volume_df')
+                self.assertEqual(self.payload()['returncode'], code)
+                self.assertEqual(self.payload()['cause_type'], 'CalledProcessError')
+                self.assertNotIn('timeout_seconds', self.payload())
+                self.assertNotIn('NEVER_PUBLIC', str(self.runner.call_args))
+        cause = PermissionError(errno.EACCES, 'NEVER_PUBLIC', '/private/NEVER_PUBLIC')
+        outer = OSError(errno.EIO, 'NEVER_PUBLIC'); outer.__cause__ = cause
+        diagnostics.emit('worker_start_failed', error=outer, operation='storage_path')
+        self.assertEqual(self.payload()['errno'], errno.EIO)
+        self.assertEqual(self.payload()['cause_errno'], errno.EACCES)
+        self.assertEqual(self.payload()['cause_errno_name'], 'EACCES')
+        self.assertNotIn('NEVER_PUBLIC', str(self.runner.call_args))
+
+    def test_invalid_operations_and_numeric_fields_are_omitted(self):
+        for operation in ('/private/NEVER_PUBLIC', ['NEVER_PUBLIC'], None):
+            exc = OSError(); exc._diagnostic_operation = operation
+            diagnostics.emit('worker_start_failed', error=exc, operation=operation)
+            self.assertNotIn('operation', self.payload())
+        for seconds in (True, 'NEVER_PUBLIC', float('nan'), float('inf'), -1, 0, 3601, 10**1000):
+            diagnostics.emit('worker_start_failed', error=subprocess.TimeoutExpired('NEVER_PUBLIC', seconds))
+            self.assertNotIn('timeout_seconds', self.payload())
+            self.assertNotIn('NEVER_PUBLIC', str(self.runner.call_args))
+        diagnostics.emit('worker_start_failed', error=subprocess.CalledProcessError(True, 'NEVER_PUBLIC'))
+        self.assertNotIn('returncode', self.payload())
+
+    def test_cause_chain_is_bounded_cycle_safe_and_ignores_implicit_context(self):
+        private_type = type('NEVER_PUBLIC_CLASS', (Exception,), {})
+        outer = OSError('NEVER_PUBLIC'); inner = private_type('NEVER_PUBLIC')
+        outer.__cause__ = inner; inner.__cause__ = outer
+        diagnostics.emit('worker_start_failed', error=outer)
+        self.assertEqual(self.payload()['cause_type'], 'Exception')
+        self.assertNotIn('NEVER_PUBLIC', str(self.runner.call_args))
+        chain = [OSError('NEVER_PUBLIC') for _ in range(4)]
+        hidden = subprocess.TimeoutExpired('NEVER_PUBLIC', 10)
+        for left, right in zip(chain, chain[1:]+[hidden]): left.__cause__ = right
+        diagnostics.mark_operation(hidden, 'volume_diskutil')
+        diagnostics.emit('worker_start_failed', error=chain[0], operation='store_initialize')
+        self.assertEqual(self.payload()['operation'], 'store_initialize')
+        self.assertNotIn('timeout_seconds', self.payload())
+        outer = OSError(); outer.__context__ = hidden
+        diagnostics.emit('worker_start_failed', error=outer)
+        self.assertNotIn('cause_type', self.payload())
+        self.assertNotIn('timeout_seconds', self.payload())
+
+    def test_other_events_do_not_gain_initialization_fields(self):
+        error = OSError(); error.__cause__ = subprocess.TimeoutExpired('NEVER_PUBLIC', 10)
+        diagnostics.mark_operation(error, 'volume_diskutil')
+        diagnostics.emit('recording_suspended', error=error, operation='volume_diskutil')
+        self.assertEqual(self.payload()['exception_type'], 'OSError')
+        for key in ('operation', 'cause_type', 'timeout_seconds', 'cause_errno'):
+            self.assertNotIn(key, self.payload())
+
+    def test_operation_tagging_preserves_exception_and_tolerates_unwritable_metadata(self):
+        error = OSError(errno.EIO, 'NEVER_PUBLIC')
+        args = error.args
+        diagnostics.mark_operation(error, 'storage_path')
+        diagnostics.mark_operation(error, 'store_initialize')
+        self.assertEqual(error._diagnostic_operation, 'storage_path')
+        self.assertEqual(error.args, args)
+        class Unwritable(OSError):
+            def __setattr__(self, name, value):
+                if name == '_diagnostic_operation': raise RuntimeError('NEVER_PUBLIC')
+                super().__setattr__(name, value)
+        error = Unwritable('NEVER_PUBLIC')
+        diagnostics.mark_operation(error, 'storage_path')
+        diagnostics.emit('worker_start_failed', error=error, operation='store_initialize')
+        self.assertEqual(self.payload()['operation'], 'store_initialize')
+        self.assertEqual(self.payload()['exception_type'], 'OSError')
+        self.assertNotIn('NEVER_PUBLIC', str(self.runner.call_args))
+
+
 class RuntimeDiagnosticsTests(unittest.TestCase):
     def monitor(self):
         m = runtime.Monitor.__new__(runtime.Monitor)
@@ -176,6 +273,33 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
             s.tick()
         log.assert_called_once()
         self.assertEqual(log.call_args.args[0], 'service_initialization_failed')
+
+
+    @patch('blackbox.runtime.disk_io', return_value=None)
+    @patch('blackbox.runtime.DuScanner')
+    @patch('blackbox.runtime.Store')
+    def test_initialization_diagnostic_failure_preserves_original_exception(self, store, scanner, io):
+        original = OSError(errno.EIO, 'NEVER_PUBLIC')
+        store.side_effect = original
+        with patch('blackbox.runtime.diagnostic', side_effect=RuntimeError('diagnostic failed')):
+            with self.assertRaises(OSError) as caught:
+                runtime.worker('/synthetic', IDENT, 7)
+        self.assertIs(caught.exception, original)
+        scanner.assert_not_called()
+
+    @patch('blackbox.runtime.diagnostic')
+    @patch('blackbox.runtime.disk_io', return_value=None)
+    @patch('blackbox.runtime.DuScanner')
+    @patch('blackbox.runtime.Store')
+    def test_scan_lookup_failure_has_distinct_fallback_operation(self, store, scanner, io, log):
+        original = sqlite3.OperationalError('NEVER_PUBLIC')
+        store.return_value.rows.side_effect = original
+        with self.assertRaises(sqlite3.Error) as caught:
+            runtime.worker('/synthetic', IDENT, 7)
+        self.assertIs(caught.exception, original)
+        self.assertEqual(log.call_args.kwargs['operation'], 'scan_lookup')
+        log.assert_called_once()
+        scanner.assert_not_called()
 
 
 if __name__ == '__main__':

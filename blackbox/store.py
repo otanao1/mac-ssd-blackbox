@@ -6,6 +6,8 @@ import sqlite3
 import time
 import uuid
 
+from .diagnostics import mark_operation
+
 def scan_version(layer):
     return 2 if layer in ('L2', 'L3', 'L9') else 1
 
@@ -46,37 +48,49 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 class Store:
     def __init__(self, directory, *, create=False, identity=None):
-        self.identity = identity
-        if identity is not None:
-            from .destination import verify
-            if Path(directory).absolute() != Path(identity["path"]):
-                raise ValueError("storage identity does not match directory")
-            verify(identity)
-        self.directory = Path(directory).resolve(strict=True)
-        if not self.directory.is_dir():
-            raise ValueError('data directory must already exist')
-        self.device = self.directory.stat().st_dev
-        self.inode = self.directory.stat().st_ino
-        database = self.directory / 'blackbox.sqlite3'
-        for suffix in ('-journal', '-wal', '-shm'):
-            if Path(str(database)+suffix).is_symlink():
-                raise OSError('SQLite sidecar must not be a symbolic link')
-        if database.is_symlink():
-            raise ValueError('database must not be a symbolic link')
-        if create and database.exists():
-            raise ValueError('data directory is already initialized')
-        # Reopening never creates a fallback database after an unmount.
-        self.db = sqlite3.connect(database.as_uri() + ('?mode=rwc' if create else '?mode=rw'),
-                                  uri=True, timeout=5)
-        os.chmod(self.directory / 'blackbox.sqlite3', 0o600)
-        self.database_identity = (database.stat().st_dev, database.stat().st_ino)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute('PRAGMA foreign_keys=ON')
-        # Only explicit creation initializes schema. Existing DBs are opened as-is;
-        # schema changes belong to the separately approved operational cutover.
-        if create:
-            self.db.executescript(SCHEMA)
-            self.db.commit()
+        operation = 'store_initialize'
+        try:
+            self.identity = identity
+            operation = 'storage_identity'
+            if identity is not None:
+                from .destination import verify
+                if Path(directory).absolute() != Path(identity["path"]):
+                    raise ValueError("storage identity does not match directory")
+                verify(identity)
+            operation = 'storage_path'
+            self.directory = Path(directory).resolve(strict=True)
+            if not self.directory.is_dir():
+                raise ValueError('data directory must already exist')
+            self.device = self.directory.stat().st_dev
+            self.inode = self.directory.stat().st_ino
+            database = self.directory / 'blackbox.sqlite3'
+            operation = 'storage_sidecar'
+            for suffix in ('-journal', '-wal', '-shm'):
+                if Path(str(database)+suffix).is_symlink():
+                    raise OSError('SQLite sidecar must not be a symbolic link')
+            if database.is_symlink():
+                raise ValueError('database must not be a symbolic link')
+            if create and database.exists():
+                raise ValueError('data directory is already initialized')
+            # Reopening never creates a fallback database after an unmount.
+            operation = 'sqlite_open'
+            self.db = sqlite3.connect(database.as_uri() + ('?mode=rwc' if create else '?mode=rw'),
+                                      uri=True, timeout=5)
+            operation = 'database_permissions'
+            os.chmod(self.directory / 'blackbox.sqlite3', 0o600)
+            operation = 'database_identity'
+            self.database_identity = (database.stat().st_dev, database.stat().st_ino)
+            operation = 'sqlite_setup'
+            self.db.row_factory = sqlite3.Row
+            self.db.execute('PRAGMA foreign_keys=ON')
+            # Only explicit creation initializes schema. Existing DBs are opened as-is;
+            # schema changes belong to the separately approved operational cutover.
+            if create:
+                self.db.executescript(SCHEMA)
+                self.db.commit()
+        except Exception as exc:
+            mark_operation(exc, operation)
+            raise
 
     def check(self):
         if self.identity is not None:

@@ -210,6 +210,24 @@ macOS 26.6.2で対応オプションを確認した。他のmacOS版での対応
 送信元プロセスは`log`になるため、メッセージの`origin_pid`・`occurred_at`とscan IDで対応を確認する。
 例外本文・traceback・対象パス・アカウント名は送らず、例外クラスの許可リスト、errno、SQLiteコード・名称を記録する。
 公開されるメッセージは許可したフィールドだけで構成する。
+
+`worker_start_failed`（`stage=initialize`）は、#18の診断拡張により次の項目も記録する。
+
+| 項目 | 内容 |
+| --- | --- |
+| `operation` | 許可リスト内の固定操作名。`volume_df` / `volume_diskutil` / `volume_plist` / `volume_mount`、保存先identity確認、`sqlite_open` / `database_permissions` / `sqlite_setup` / `scan_lookup`等 |
+| `exception_type` / `cause_type` | 最上位例外と明示的な原因例外を標準型の固定名称に分類。未知のクラス名は`Exception` |
+| `errno` / `errno_name` | 最上位例外の整数errno（従来どおり） |
+| `cause_errno` / `cause_errno_name` | 原因例外に整数errnoがある場合のみ。最上位errnoとは分ける |
+| `timeout_seconds` | `TimeoutExpired`の有限・正のtimeout値（ログ形式上は最大3,600秒） |
+| `returncode` | `CalledProcessError`の整数終了コードがある場合。親の`worker_unexpected_exit.returncode`は従来どおりworker自身の終了コード |
+
+原因連鎖は最上位を含む最大4例外まで、循環を避けて明示的な`__cause__`だけを読む。内側の具体的な操作名を優先する。値がない項目は省略し、推定で埋めない。例外全文、コマンド引数、stdout/stderr、実パス、UUIDは出力しない。他の診断イベントにこれらの初期化用項目は追加しない。
+
+例えば、保存先のdiskutil照会が本当にtimeoutした場合は、`operation=volume_diskutil`、`exception_type=OSError`、`cause_type=TimeoutExpired`、`timeout_seconds=10`として識別できる。これは記録形式の例であり、過去の初期化失敗がtimeoutだったと確定するものではない。
+
+初期化処理の例外型・メッセージ・伝播は維持する。操作名付与や診断自体が失敗しても元の例外を隠さない。外部照会の10秒、SQLiteの5秒という既存timeout、実行回数、安全確認、DB形式は変更しない。詳細は既存の失敗イベント1回に含め、正常時の追加ログや外部照会は行わない。
+
 監視側の例外、中断要求、workerの受信シグナル／利用者cancel、終了記録失敗、予期しない子終了、復旧を区別する。
 同じ記録停止の継続中は繰り返し出力せず、復旧後の再発は改めて記録する。
 

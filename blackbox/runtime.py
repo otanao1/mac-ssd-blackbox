@@ -132,11 +132,17 @@ def worker(directory, ident, inherited_lock, identity=None):
     baseline = resource.getrusage(resource.RUSAGE_SELF)
     child_baseline = resource.getrusage(resource.RUSAGE_CHILDREN)
     io_start = disk_io()
+    operation = 'store_initialize'
     try:
         store = Store(directory, identity=identity)
+        operation = 'scan_lookup'
         scan = store.rows('SELECT * FROM scans WHERE id=?', (ident,))[0]
     except Exception as exc:
-        diagnostic('worker_start_failed', error=exc, scan_id=ident, stage='initialize')
+        try:
+            diagnostic('worker_start_failed', error=exc, scan_id=ident,
+                       stage='initialize', operation=operation)
+        except Exception:
+            pass  # Diagnostics must never replace the initialization exception.
         raise
     interrupted = False
     received_signal = None
