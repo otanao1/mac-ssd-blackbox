@@ -683,5 +683,24 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(database.stat().st_size, 0)
 
 
+    def test_new_l9_investigation_waits_for_new_version_instead_of_reusing_old(self):
+        ident = self.prepare_l9()
+        old = self.l9_scan(self.now-1, {'/synthetic/cache': 3*GIB})
+        self.store.execute('UPDATE scans SET scan_version=1 WHERE id=?',(old,))
+        with self.store.db:
+            self.store.db.execute('INSERT INTO waiting VALUES(?,?,?)',
+                ('/synthetic/cache/*',json.dumps(DEFAULT_OPTIONS,sort_keys=True),self.now))
+        advance(self.store,self.targets)
+        item = details(self.store,ident)[0]
+        self.assertEqual(item['stage'],'L9')
+        self.assertIsNone(item['investigation'][-1]['target_evaluations']['/synthetic/cache/*']['scan_id'])
+        self.store.execute('DELETE FROM waiting')
+        current = self.l9_scan(self.now+10, {'/synthetic/cache': 3*GIB})
+        item, evaluations = self.finish_l9(ident)
+        self.assertEqual(evaluations['/synthetic/cache/*']['scan_id'],current)
+        self.assertIsNone(evaluations['/synthetic/cache/*']['baseline_id'])
+        self.assertNotIn(old,item['scan_ids'])
+
+
 if __name__ == '__main__':
     unittest.main()

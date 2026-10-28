@@ -13,8 +13,8 @@ import sys
 import time
 import uuid
 
-from .scan import Cancelled, Scanner, normalize
-from .store import Store
+from .scan import Cancelled, normalize
+from .store import Store, scan_version
 from .du import DuScanner
 from .metrics import disk_io
 from .diagnostics import emit as diagnostic
@@ -100,7 +100,7 @@ def request(store, layer, targets, options=None, cooldown=1800):
     store.check()
     with store.db:
         store.db.execute('BEGIN IMMEDIATE')
-        recent = store.rows("SELECT targets,options FROM scans WHERE layer='L9' AND started>? AND state IN ('running','succeeded','partial')", (time.time()-cooldown,))
+        recent = store.rows("SELECT targets,options FROM scans WHERE layer='L9' AND scan_version=? AND started>? AND state IN ('running','succeeded','partial')", (scan_version('L9'), time.time()-cooldown))
         for target in normalized:
             duplicate = any(json.loads(r['options']) == opts and target in json.loads(r['targets']) for r in recent)
             if duplicate:
@@ -150,12 +150,27 @@ def worker(directory, ident, inherited_lock, identity=None):
         return interrupted or bool(store.rows('SELECT cancel FROM scans WHERE id=?', (ident,))[0]['cancel'])
     def progress(path):
         store.execute('UPDATE scans SET current=? WHERE id=?', (path, ident))
+    pending = []
+    result_sql = 'INSERT OR REPLACE INTO results VALUES(?,?,?,?,?,?,?,?,?)'
+    def flush_results():
+        if pending:
+            store.check()
+            batch = pending[:]
+            pending.clear()  # A failed batch is rolled back, never retried implicitly.
+            with store.db:
+                store.db.executemany(result_sql, batch)
     def emit(row):
         store.check()
-        write = store.execute if scan['layer'] in ('L2', 'L3') else store.db.execute
-        write('INSERT OR REPLACE INTO results VALUES(?,?,?,?,?,?,?,?,?)',
-                      (ident, row['path'], row['kind'], row.get('bytes'), row.get('logical'),
-                       row['status'], row.get('error'), row.get('count'), row.get('mean_bytes')))
+        values = (ident, row['path'], row['kind'], row.get('bytes'), row.get('logical'),
+                  row['status'], row.get('error'), row.get('count'), row.get('mean_bytes'))
+        if scan['layer'] == 'L9':
+            # Bounded batches reduce journal/fsync overhead. No filesystem walking,
+            # progress callbacks, or child waits occur inside this transaction.
+            pending.append(values)
+            if len(pending) >= 100:
+                flush_results()
+        else:
+            store.execute(result_sql, values)
     state, error = 'succeeded', None
     failure = None
     try:
@@ -163,9 +178,9 @@ def worker(directory, ident, inherited_lock, identity=None):
             raise Cancelled()
         def target_done(n):
             store.execute('UPDATE scans SET completed=? WHERE id=?', (n, ident))
-        scanner_class = DuScanner if scan['layer'] in ('L2', 'L3') else Scanner
-        scanner = scanner_class(store.db, progress, cancelled, target_done=target_done)
+        scanner = DuScanner(store.db, progress, cancelled, target_done=target_done)
         scanner.run(json.loads(scan['targets']), scan['layer'], json.loads(scan['options']), emit)
+        flush_results()
         if cancelled():
             raise Cancelled()
         if store.rows("SELECT 1 FROM results WHERE scan_id=? AND status NOT IN ('ok','deduplicated') LIMIT 1", (ident,)):
@@ -176,6 +191,11 @@ def worker(directory, ident, inherited_lock, identity=None):
         failure = exc
         state, error = 'failed', str(exc)
     finally:
+        try:
+            flush_results()
+        except BaseException as exc:
+            failure = exc
+            state, error = 'failed', str(exc)
         usage = resource.getrusage(resource.RUSAGE_SELF)
         elapsed = time.monotonic()-started
         child_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -275,13 +295,15 @@ class Monitor:
                     opts = waiting[0]['options']
                     targets = [r['target'] for r in self.store.rows('SELECT target FROM waiting WHERE options=?', (opts,))]
                     ident = uuid.uuid4().hex
-                    self.store.db.execute("INSERT INTO scans(id,layer,trigger,targets,options,state,created,total) VALUES(?,'L9','request',?,?,'pending',?,?)", (ident, json.dumps(targets), opts, time.time(), len(targets)))
+                    self.store.db.execute("INSERT INTO scans(id,layer,trigger,targets,options,state,created,total,scan_version) VALUES(?,'L9','request',?,?,'pending',?,?,?)", (ident, json.dumps(targets), opts, time.time(), len(targets), scan_version('L9')))
                     self.store.db.execute('DELETE FROM waiting WHERE options=?', (opts,))
                 elif pending:
                     ident = pending[0]['id']
                 else:
                     return
-                self.store.db.execute("UPDATE scans SET state='running',started=? WHERE id=?", (time.time(), ident))
+                # A not-yet-started L9 from an older installation uses this worker's
+                # acquisition format. Completed history is never relabeled.
+                self.store.db.execute("UPDATE scans SET state='running',started=?,scan_version=CASE WHEN layer='L9' THEN ? ELSE scan_version END WHERE id=?", (time.time(), scan_version('L9'), ident))
             self.active_id = ident
             try:
                 self.child = subprocess.Popen([sys.executable, '-m', 'blackbox', '_worker', str(self.store.directory), ident, str(scan_fd), json.dumps(self.store.identity)],

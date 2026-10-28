@@ -270,6 +270,7 @@ def advance(store, targets, settings=None, notify=None):
             # Existing request dedup/cooldown is authoritative. Retrying after a crash is safe.
             result = request(store, 'L9', paths, opts, cfg['l9_cooldown'])
             item['investigation'].append(dict(layer='L9', targets=paths, options=opts,
+                                              scan_version=scan_version('L9'),
                                               requested=time.time(), request=result, scans={}))
             item['stage'] = 'L9'
             with store.db:
@@ -280,7 +281,9 @@ def advance(store, targets, settings=None, notify=None):
             step['target_evaluations'] = {}
             for target in step['targets']:
                 found = None
-                for raw in store.db.execute("SELECT * FROM scans WHERE layer='L9' AND started>=? ORDER BY started DESC", (step['requested']-cfg['l9_cooldown'],)):
+                # Old in-flight investigations retain their original lookup behavior.
+                version = step.get('scan_version')
+                for raw in store.db.execute("SELECT * FROM scans WHERE layer='L9' AND started>=? AND (? IS NULL OR scan_version=?) ORDER BY started DESC", (step['requested']-cfg['l9_cooldown'], version, version)):
                     scan = dict(raw)
                     if target in json.loads(scan['targets']) and json.loads(scan['options']) == step['options']:
                         found = scan

@@ -23,7 +23,7 @@ The goal is to retain enough historical context to investigate *when* space disa
 | L3 | Selected applications and change-prone locations | Hourly and on anomaly |
 | L9 | Detailed investigation of suspected directories | On demand, following an Incident |
 
-L2 and L3 use shared scan logic and configurable path lists. A path ending in `/*` records the parent total plus its immediate children; a plain path records its total only. The Incident investigation order is L3, then L2 if needed, then L9. See [monitoring design](docs/monitoring-design.md) and [Issue #2](https://github.com/otanao1/mac-ssd-blackbox/issues/2).
+L2 and L3 use shared scan logic and configurable path lists. A path ending in `/*` records the parent total plus its immediate children; a plain path records its total only. The Incident investigation order is L3, then L2 if needed, then L9. L9 combines streamed detail metadata with batched `du` totals, keeps small-file statistics, and uses allocated size without a full-node SQLite TEMP table. See [monitoring design](docs/monitoring-design.md) and [Issue #2](https://github.com/otanao1/mac-ssd-blackbox/issues/2).
 
 Collection intervals and targets will be configurable. Diagnostic scans will be bounded and must not accidentally traverse external mounts.
 

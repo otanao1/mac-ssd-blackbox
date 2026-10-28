@@ -1,7 +1,7 @@
-"""L2/L3 allocated capacity: disjoint du operands, selected rows only.
+"""Allocated capacity: disjoint du operands, selected rows only.
 
 No filesystem-node TEMP tables, file-content reads, or name-based exclusions.
-L9 continues to use the detailed Python scanner.
+L9 enumerates its detail horizon before aggregating disjoint leaf subtrees.
 """
 import errno
 import os
@@ -163,6 +163,8 @@ class DuScanner:
                     self.bad.add(path)
 
     def aggregate(self, path, device, explicit=False):
+        if self.layer == 'L9':
+            return self.aggregate_detail(path, device, explicit)
         self.pulse(path)
         try:
             st, kind = self.metadata(path)
@@ -204,9 +206,122 @@ class DuScanner:
         except OSError as exc:
             self.failure(path, exc)
 
+    def detail_budget(self, path):
+        return max((self.depth - (0 if path == root else
+                    len(Path(path).relative_to(root).parts))
+                    for root, children in self.specs.items()
+                    if children and (path == root or beneath(path, root))
+                    and not any((path == mount or beneath(path, mount)) and beneath(mount, root)
+                                for mount in self.boundaries)), default=0)
+
+    def detail_entries(self, path):
+        # Stream metadata while holding the parent fd: never keep all small files.
+        before = os.stat(path, follow_symlinks=False)
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise OSError('directory changed during scan')
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    child = os.path.join(path, entry.name)
+                    self.pulse(child)
+                    try:
+                        st = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                    except OSError as exc:
+                        self.failure(child, exc)
+                        yield child, None
+                    else:
+                        yield child, st
+        finally:
+            os.close(fd)
+
+    def aggregate_detail(self, path, device, explicit=False):
+        self.pulse(path)
+        try:
+            st, kind = self.metadata(path)
+            if st.st_dev != device or (not explicit and (path in self.boundaries or os.path.ismount(path))):
+                self.record(path, 'boundary', status='excluded', error='mount boundary')
+                return
+            if kind != 'directory':
+                self.record(path, kind, st.st_blocks*512)
+                return
+            nested = [p for p in self.targets | self.boundaries if beneath(p, path)]
+            detailed = self.detail_budget(path) > 0
+            if not detailed and not nested:
+                self.detail_leaves.append(path)
+                return
+            candidates, directories, remaining = [], [], []
+            count = small = 0
+            total = st.st_blocks*512
+            for child, cs in self.detail_entries(path):
+                if cs is None:
+                    candidates.append(child)
+                    continue
+                if cs.st_dev != device or child in self.boundaries or os.path.ismount(child):
+                    self.record(child, 'boundary', status='excluded', error='mount boundary')
+                    candidates.append(child)
+                elif stat.S_ISDIR(cs.st_mode):
+                    candidates.append(child)
+                    directories.append(child)
+                    if self.detail_budget(child) > 0 or any(child == p or beneath(p, child) for p in nested):
+                        self.aggregate_detail(child, device)
+                    else:
+                        remaining.append(child)
+                else:
+                    size = cs.st_blocks*512
+                    total += size
+                    kind = ('file' if stat.S_ISREG(cs.st_mode) else
+                            'symlink' if stat.S_ISLNK(cs.st_mode) else 'special')
+                    if detailed and kind == 'file' and size < self.threshold*.05:
+                        count += 1
+                        small += size
+                        if child in self.targets:
+                            self.record(child, kind, size)
+                    elif detailed or child in self.targets:
+                        self.record(child, kind, size)
+                        candidates.append(child)
+            self.detail_leaves.extend(remaining)
+            # Descendants are inserted first. Sum only after the batched leaf du.
+            self.detail_totals[path] = (total, directories)
+            self.children[path] = candidates
+            if count:
+                self.small[path] = dict(path=path, kind='small_files', bytes=small,
+                    logical=None, status='ok', error=None, count=count, mean_bytes=small/count)
+        except OSError as exc:
+            self.failure(path, exc)
+
+    def finish_detail(self, device):
+        try:
+            self.du(self.detail_leaves, device)
+        except OSError as exc:
+            # Conservatively invalidate the operands if a batch cannot be parsed
+            # or safely launched; never synthesize a successful zero total.
+            for path in self.detail_leaves:
+                self.failure(path, exc)
+        for path, (own, directories) in self.detail_totals.items():
+            self.pulse(path)
+            self.record(path, 'directory', own + sum(self.rows[p]['bytes'] or 0 for p in directories))
+
+    def keep_detail(self, path, depth, keep, statistics):
+        if depth >= self.depth:
+            return
+        for child in self.children.get(path, []):
+            self.pulse(child)
+            keep.add(child)
+            row = self.rows[child]
+            if (row['kind'] == 'directory' and child not in self.boundaries
+                    and not os.path.ismount(child) and (row['bytes'] or 0) >= self.threshold*.5):
+                self.keep_detail(child, depth+1, keep, statistics)
+        if path in self.small:
+            statistics.add(path)
+
     def run(self, targets, layer, options, emit):
-        if layer not in ('L2', 'L3'):
-            raise ValueError('du aggregation supports L2/L3')
+        if layer not in ('L2', 'L3', 'L9'):
+            raise ValueError('du aggregation supports L2/L3/L9')
+        self.layer = layer
+        self.threshold, self.depth = options.get('threshold', 1024**3), options.get('max_depth', 7)
+        self.small = {}
         self.specs = dict(sorted(set(normalize(s) for s in targets)))
         self.targets = set(self.specs)
         self.rows, self.children, self.bad = {}, {}, set()
@@ -233,11 +348,19 @@ class DuScanner:
             except OSError as exc:
                 self.failure(path, exc)
                 continue
+            if layer == 'L9':
+                self.detail_leaves, self.detail_totals = [], {}
             self.aggregate(path, device, explicit=True)
+            if layer == 'L9':
+                self.finish_detail(device)
         keep = set(self.targets)
+        statistics = set()
         for path, children in self.specs.items():
             if children:
-                keep.update(self.children.get(path, []))
+                if layer == 'L9':
+                    self.keep_detail(path, 0, keep, statistics)
+                else:
+                    keep.update(self.children.get(path, []))
         keep.update(p for p, r in self.rows.items() if r['status'] in ('error', 'missing', 'excluded'))
         for index, path in enumerate(self.specs):
             self.target_done(index)
@@ -252,4 +375,7 @@ class DuScanner:
             if row['kind'] == 'directory' and any(beneath(p, path) for p in self.bad):
                 row['status'] = 'partial'
             emit(row)
+        for path in sorted(statistics):
+            self.pulse(path)
+            emit(self.small[path])
         self.target_done(len(self.specs))
