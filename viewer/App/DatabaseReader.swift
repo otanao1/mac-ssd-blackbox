@@ -46,6 +46,10 @@ enum DatabaseReader {
     }
 
     static func readAll(_ source: DatabaseSource, now: Date, windows: [StorageLayer: StorageWindow] = [:]) throws -> ViewerReading {
+        try withSource(source) { db in try readConnected(db, now: now, windows: windows) }
+    }
+
+    static func withSource<T>(_ source: DatabaseSource, body: (OpaquePointer) throws -> T) throws -> T {
         var stale = false
         let folder = try URL(resolvingBookmarkData: source.bookmark, options: [.withSecurityScope, .withoutUI],
                              relativeTo: nil, bookmarkDataIsStale: &stale)
@@ -53,7 +57,7 @@ enum DatabaseReader {
         defer { folder.stopAccessingSecurityScopedResource() }
         let url = try validate(folder, identity: source.identity)
         return try withReadOnlyConnection(url) { db in
-            let result = try readConnected(db, now: now, windows: windows)
+            let result = try body(db)
             _ = try validate(folder, identity: source.identity)
             return result
         }

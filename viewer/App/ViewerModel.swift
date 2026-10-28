@@ -15,6 +15,17 @@ final class ViewerModel: ObservableObject {
     @Published private(set) var storageWindows: [StorageLayer: StorageWindow] = [.l2: StorageWindow(days: 7), .l3: StorageWindow(days: 3)]
     @Published private(set) var resetID = 0
     @Published private(set) var storageRevision = 0
+    @Published private(set) var todayReading: TodaySnapshot?
+    @Published private(set) var todayDate: Date?
+    @Published private(set) var todayMessage: String?
+    @Published private(set) var todayLoading = false
+    @Published private(set) var todayDetails: [String: TodayScanDetail] = [:]
+    @Published private(set) var todayDetailErrors: Set<String> = []
+    @Published private(set) var todayRevision = 0
+    private var todayGeneration = 0
+    private var todayDetailLoading: Set<String> = []
+    private var previewToday: ((Date, Date) -> TodaySnapshot)?
+    var selectedToday: Date { TodaySnapshot.selectedDay(todayDate, now: now) }
     private var pendingRefresh = false
     private var previewMode = false
     private var previewLoader: (([StorageLayer: StorageWindow]) -> ViewerReading)?
@@ -27,8 +38,10 @@ final class ViewerModel: ObservableObject {
 
     // A synthetic reading lets the standalone review harness exercise the production UI
     // without bookmarks, timers, shared-cache writes or a monitoring database.
-    init(preview: ViewerReading? = nil, previewLoader: (([StorageLayer: StorageWindow]) -> ViewerReading)? = nil) {
+    init(preview: ViewerReading? = nil, previewLoader: (([StorageLayer: StorageWindow]) -> ViewerReading)? = nil, previewToday: ((Date, Date) -> TodaySnapshot)? = nil) {
         if let preview {
+            self.previewToday = previewToday
+            todayReading = previewToday?(preview.l1.generatedAt, preview.l1.generatedAt)
             previewMode = true; self.previewLoader = previewLoader; reading = preview; snapshot = preview.l1; now = preview.l1.generatedAt
             return
         }
@@ -48,11 +61,13 @@ final class ViewerModel: ObservableObject {
         guard !refreshing else { pendingRefresh = true; return }
         if previewMode {
             if let previewLoader { reading = previewLoader(storageWindows) }
+            await refreshToday()
             return
         }
         now = Date()
         guard let source else {
             publish(snapshot, forceWidgetReload: forceWidgetReload)
+            await refreshToday()
             return
         }
         refreshing = true
@@ -76,6 +91,59 @@ final class ViewerModel: ObservableObject {
                                   latest: snapshot.latest, status: .unavailable)
         }
         publish(snapshot, forceWidgetReload: forceWidgetReload)
+        await refreshToday()
+    }
+
+    func moveToday(by amount: Int) {
+        let day = TodaySnapshot.move(selectedToday, by: amount, now: now)
+        guard day != selectedToday else { return }
+        todayDate = day == Calendar.current.startOfDay(for: now) ? nil : day
+        invalidateToday()
+        Task { await refreshToday() }
+    }
+
+    private func invalidateToday() {
+        todayGeneration += 1
+        todayReading = nil; todayMessage = nil; todayLoading = false
+        todayDetails = [:]; todayDetailErrors = []; todayDetailLoading = []
+        todayRevision += 1
+    }
+
+    func refreshToday() async {
+        if !previewMode { now = Date() }
+        todayGeneration += 1
+        let generation = todayGeneration, day = selectedToday, date = now
+        todayLoading = true
+        if previewMode {
+            todayReading = previewToday?(day, date)
+            todayLoading = false
+            return
+        }
+        guard let source else {
+            todayMessage = "保存先が未設定です。既存の監視設定とDBフォルダを選択してください。"
+            todayLoading = false
+            return
+        }
+        let result = await Task.detached(priority: .utility) {
+            try? DatabaseReader.readToday(source, day: day, now: date)
+        }.value
+        guard generation == todayGeneration, day == selectedToday else { return }
+        todayLoading = false
+        todayReading = result
+        todayMessage = result == nil ? "表示日のデータを取得できません。保存先と接続状態を確認してください。" : nil
+        todayDetails = [:]; todayDetailErrors = []; todayDetailLoading = []
+        todayRevision += 1
+    }
+
+    func loadTodayScan(_ id: String) async {
+        guard todayDetails[id] == nil, !todayDetailLoading.contains(id), let source, !previewMode else { return }
+        let generation = todayGeneration
+        todayDetailLoading.insert(id)
+        let result = await Task.detached(priority: .utility) { try? DatabaseReader.readTodayScan(source, id: id) }.value
+        guard generation == todayGeneration else { return }
+        todayDetailLoading.remove(id)
+        if let result { todayDetails[id] = result; todayDetailErrors.remove(id) }
+        else { todayDetailErrors.insert(id) }
     }
 
     func setWindow(_ window: StorageWindow, for layer: StorageLayer) {
@@ -150,6 +218,7 @@ final class ViewerModel: ObservableObject {
             let encoded = try JSONEncoder().encode(selected)
             UserDefaults.standard.set(encoded, forKey: sourceKey)
             source = selected
+            invalidateToday()
             snapshot = .empty
             reading = nil
             configurationMessage = nil
