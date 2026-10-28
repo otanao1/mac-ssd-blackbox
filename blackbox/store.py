@@ -7,7 +7,7 @@ import time
 import uuid
 
 def scan_version(layer):
-    return 2 if layer in ('L2', 'L3') else 1
+    return 2 if layer in ('L2', 'L3', 'L9') else 1
 
 
 SCHEMA = """

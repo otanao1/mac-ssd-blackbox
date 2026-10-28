@@ -1,4 +1,8 @@
-"""Detailed Python walk for L9 (legacy L2/L3 reference). Never read file contents."""
+"""Shared path/device helpers and legacy reference walk for synthetic comparisons.
+
+Runtime L2/L3/L9 use DuScanner; Scanner is retained for compatibility tests and
+the bounded benchmark only. Never read file contents.
+"""
 import os
 from pathlib import Path
 import plistlib
