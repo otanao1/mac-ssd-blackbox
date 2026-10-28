@@ -1,5 +1,6 @@
 """Issue #8 tests: synthetic storage, no real launchctl or installed LaunchAgents."""
 import copy
+import errno
 import json
 import os
 from pathlib import Path
@@ -63,6 +64,110 @@ class OperationsTest(unittest.TestCase):
         self.addCleanup(service.close)
         return service
 
+    def test_identity_worker_diskutil_timeout_preserves_cause_and_emits_safe_payload(self):
+        from blackbox import runtime
+        self.mount_patch.stop()
+        calls, payloads = [], []
+        cause = subprocess.TimeoutExpired(['/private/NEVER_PUBLIC'], 10,
+                                          output=b'NEVER_PUBLIC', stderr=b'NEVER_PUBLIC')
+        def run(args, **kwargs):
+            calls.append((args, kwargs))
+            if args[0] == '/usr/bin/log':
+                payloads.append(json.loads(args[-1]))
+                return subprocess.CompletedProcess(args, 0)
+            if args[0] == '/bin/df':
+                return Mock(stdout='Filesystem blocks\n/dev/disk9s1 1 1 1 0% /synthetic\n')
+            self.assertEqual(args[:3], ['/usr/sbin/diskutil', 'info', '-plist'])
+            raise cause
+        try:
+            with patch('blackbox.destination.subprocess.run', side_effect=run), \
+                 patch('blackbox.store.sqlite3.connect') as connect, \
+                 patch('blackbox.runtime.DuScanner') as scanner, \
+                 patch('blackbox.runtime.disk_io', return_value=None):
+                with self.assertRaises(OSError) as caught:
+                    runtime.worker(str(self.data), 'a'*32, 7, self.identity)
+            self.assertIs(caught.exception.__cause__, cause)
+            self.assertEqual(str(caught.exception), 'cannot query storage volume: '+str(cause))
+            connect.assert_not_called(); scanner.assert_not_called()
+            self.assertEqual(len(payloads), 1)
+            self.assertEqual(payloads[0]['operation'], 'volume_diskutil')
+            self.assertEqual(payloads[0]['exception_type'], 'OSError')
+            self.assertEqual(payloads[0]['cause_type'], 'TimeoutExpired')
+            self.assertEqual(payloads[0]['timeout_seconds'], 10)
+            self.assertNotIn('NEVER_PUBLIC', json.dumps(payloads))
+            self.assertNotIn(str(self.data), json.dumps(payloads))
+            self.assertEqual([kw['timeout'] for args, kw in calls], [10, 10, 1])
+        finally:
+            self.mount_patch.start()
+
+    def test_volume_query_error_operations_and_numeric_details(self):
+        from blackbox import diagnostics
+        self.mount_patch.stop()
+        try:
+            for command, operation in (('df','volume_df'),('diskutil','volume_diskutil'),('mount','volume_mount')):
+                for kind in ('timeout','exit','errno'):
+                    with self.subTest(command=command,kind=kind):
+                        payloads=[];queries=[]
+                        error = (subprocess.TimeoutExpired('NEVER_PUBLIC',10) if kind=='timeout' else
+                                 subprocess.CalledProcessError(64,'NEVER_PUBLIC',output='NEVER_PUBLIC',stderr='NEVER_PUBLIC') if kind=='exit' else
+                                 PermissionError(errno.EACCES,'NEVER_PUBLIC','/private/NEVER_PUBLIC'))
+                        def run(args, **kwargs):
+                            if args[0]=='/usr/bin/log':
+                                payloads.append(json.loads(args[-1]));return Mock(returncode=0)
+                            queries.append(args[0]);self.assertEqual(kwargs['timeout'],10)
+                            if args[0]=='/bin/df' and command!='df':
+                                source='//synthetic/share' if command=='mount' else '/dev/disk9s1'
+                                return Mock(stdout='Filesystem blocks\n'+source+' 1 1 1 0% /synthetic\n')
+                            raise error
+                        with patch('blackbox.destination.subprocess.run',side_effect=run):
+                            with self.assertRaises(OSError) as caught:mounted_volume(self.data)
+                            diagnostics.emit('worker_start_failed',error=caught.exception,operation='store_initialize')
+                        self.assertEqual(len(queries),1 if command=='df' else 2)
+                        self.assertEqual(payloads[0]['operation'],operation)
+                        if kind=='timeout':self.assertEqual(payloads[0]['timeout_seconds'],10)
+                        elif kind=='exit':self.assertEqual(payloads[0]['returncode'],64)
+                        else:self.assertEqual(payloads[0]['errno'],errno.EACCES)
+                        self.assertNotIn('NEVER_PUBLIC',json.dumps(payloads))
+        finally:
+            self.mount_patch.start()
+
+    def test_invalid_plist_and_mount_parse_have_distinct_operations(self):
+        self.mount_patch.stop()
+        try:
+            for source, response, expected in (('/dev/disk9s1',b'not plist','volume_plist'),
+                                               ('//synthetic/share','not a mount table','volume_mount_parse')):
+                with patch('blackbox.destination.subprocess.run',side_effect=[
+                    Mock(stdout='Filesystem blocks\n'+source+' 1 1 1 0% /synthetic\n'), Mock(stdout=response)]):
+                    with self.assertRaises(OSError) as caught:mounted_volume(self.data)
+                error=caught.exception.__cause__ or caught.exception
+                self.assertEqual(error._diagnostic_operation,expected)
+        finally:
+            self.mount_patch.start()
+
+    def test_store_open_and_permissions_failures_keep_original_error(self):
+        failure=sqlite3.OperationalError('NEVER_PUBLIC')
+        with patch('blackbox.store.sqlite3.connect',side_effect=failure) as connect:
+            with self.assertRaises(sqlite3.Error) as caught:Store(self.data,identity=self.identity)
+        self.assertIs(caught.exception,failure)
+        self.assertEqual(failure._diagnostic_operation,'sqlite_open')
+        self.assertEqual(connect.call_args.kwargs['timeout'],5)
+        failure=PermissionError(errno.EACCES,'NEVER_PUBLIC')
+        connection=sqlite3.connect(self.data/'blackbox.sqlite3');self.addCleanup(connection.close)
+        with patch('blackbox.store.sqlite3.connect',return_value=connection), \
+             patch('blackbox.store.os.chmod',side_effect=failure):
+            with self.assertRaises(OSError) as caught:Store(self.data,identity=self.identity)
+        self.assertIs(caught.exception,failure)
+        self.assertEqual(failure._diagnostic_operation,'database_permissions')
+
+    def test_successful_identity_store_keeps_database_and_emits_no_diagnostics(self):
+        before=(self.data/'blackbox.sqlite3').read_bytes()
+        self.mount.reset_mock()
+        with patch('blackbox.diagnostics.subprocess.run') as log:
+            store=Store(self.data,identity=self.identity);store.close()
+        log.assert_not_called()
+        self.mount.assert_called_once()
+        self.assertEqual((self.data/'blackbox.sqlite3').read_bytes(),before)
+
     def test_common_local_and_conf_replacement(self):
         for root in (self.common, self.private):
             (root/'l3/conf.d').mkdir(parents=True)
@@ -108,8 +213,9 @@ class OperationsTest(unittest.TestCase):
         wrong = dict(self.volume, uuid='OTHER-VOLUME')
         self.mount.return_value = wrong
         with patch('blackbox.store.sqlite3.connect') as connect:
-            with self.assertRaises(OSError):
+            with self.assertRaises(OSError) as caught:
                 Store(self.data, identity=self.identity)
+            self.assertEqual(caught.exception._diagnostic_operation, 'storage_volume_identity')
             connect.assert_not_called()
 
     def test_startup_missing_db_never_creates(self):

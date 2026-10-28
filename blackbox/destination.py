@@ -6,6 +6,8 @@ import re
 import subprocess
 import tempfile
 
+from .diagnostics import mark_operation
+
 
 def mounted_volume(directory):
     try:
@@ -15,33 +17,43 @@ def mounted_volume(directory):
 
 
 def _mounted_volume(directory):
-    path = Path(directory).resolve(strict=True)
-    # df resolves APFS firmlinks (e.g. /Users belongs to the Data volume).
-    lines = subprocess.run(['/bin/df', '-P', str(path)], capture_output=True,
-                           text=True, check=True, timeout=10).stdout.splitlines()
-    source = lines[1].split()[0] if len(lines) > 1 else ''
-    if source.startswith('/dev/'):
-        raw = subprocess.run(['/usr/sbin/diskutil', 'info', '-plist', source],
-                             capture_output=True, check=True, timeout=10).stdout
-        info = plistlib.loads(raw)
-        if not all(info.get(key) for key in ('VolumeUUID', 'MountPoint', 'FilesystemType')):
-            raise OSError('storage volume has no stable UUID/mount/filesystem')
-        return dict(kind='disk', mount=info['MountPoint'], filesystem=info['FilesystemType'],
-                    uuid=info['VolumeUUID'])
-    output = subprocess.run(['/sbin/mount'], capture_output=True, text=True, check=True, timeout=10).stdout
-    candidates = []
-    for line in output.splitlines():
-        match = re.fullmatch(r'(.+) on (.+) \(([^, )]+).*\)', line)
-        if match:
-            source, mount, filesystem = match.groups()
-            if path.is_relative_to(mount):
-                candidates.append((len(mount), source, mount, filesystem))
-    if not candidates:
-        raise OSError('cannot identify storage mount')
-    _, source, mount, filesystem = max(candidates)
-    if filesystem not in ('smbfs', 'nfs', 'afpfs', 'webdav'):
-        raise OSError('unsupported storage filesystem identity')
-    return dict(kind='network', mount=mount, filesystem=filesystem, source=source)
+    operation = 'storage_path'
+    try:
+        path = Path(directory).resolve(strict=True)
+        # df resolves APFS firmlinks (e.g. /Users belongs to the Data volume).
+        operation = 'volume_df'
+        lines = subprocess.run(['/bin/df', '-P', str(path)], capture_output=True,
+                               text=True, check=True, timeout=10).stdout.splitlines()
+        source = lines[1].split()[0] if len(lines) > 1 else ''
+        if source.startswith('/dev/'):
+            operation = 'volume_diskutil'
+            raw = subprocess.run(['/usr/sbin/diskutil', 'info', '-plist', source],
+                                 capture_output=True, check=True, timeout=10).stdout
+            operation = 'volume_plist'
+            info = plistlib.loads(raw)
+            if not all(info.get(key) for key in ('VolumeUUID', 'MountPoint', 'FilesystemType')):
+                raise OSError('storage volume has no stable UUID/mount/filesystem')
+            return dict(kind='disk', mount=info['MountPoint'], filesystem=info['FilesystemType'],
+                        uuid=info['VolumeUUID'])
+        operation = 'volume_mount'
+        output = subprocess.run(['/sbin/mount'], capture_output=True, text=True, check=True, timeout=10).stdout
+        operation = 'volume_mount_parse'
+        candidates = []
+        for line in output.splitlines():
+            match = re.fullmatch(r'(.+) on (.+) \(([^, )]+).*\)', line)
+            if match:
+                source, mount, filesystem = match.groups()
+                if path.is_relative_to(mount):
+                    candidates.append((len(mount), source, mount, filesystem))
+        if not candidates:
+            raise OSError('cannot identify storage mount')
+        _, source, mount, filesystem = max(candidates)
+        if filesystem not in ('smbfs', 'nfs', 'afpfs', 'webdav'):
+            raise OSError('unsupported storage filesystem identity')
+        return dict(kind='network', mount=mount, filesystem=filesystem, source=source)
+    except Exception as exc:
+        mark_operation(exc, operation)
+        raise
 
 
 def validate_identity(identity):
@@ -63,18 +75,26 @@ def validate_identity(identity):
 
 
 def verify(identity, *, volume=True):
-    validate_identity(identity)
-    directory = Path(identity['path'])
-    # Refuse path redirection, including changed symlink parents.
-    if str(directory.resolve(strict=True)) != str(directory):
-        raise OSError('storage path changed')
-    if volume and mounted_volume(directory) != identity['volume']:
-        raise OSError('intended storage volume is unavailable')
-    database = directory / 'blackbox.sqlite3'
-    if (not directory.is_dir() or directory.stat().st_ino != identity['directory_inode']
-            or database.is_symlink() or database.stat().st_ino != identity['database_inode']):
-        raise OSError('storage directory or database was replaced')
-    return directory
+    operation = 'storage_identity'
+    try:
+        validate_identity(identity)
+        operation = 'storage_path'
+        directory = Path(identity['path'])
+        # Refuse path redirection, including changed symlink parents.
+        if str(directory.resolve(strict=True)) != str(directory):
+            raise OSError('storage path changed')
+        operation = 'storage_volume_identity'
+        if volume and mounted_volume(directory) != identity['volume']:
+            raise OSError('intended storage volume is unavailable')
+        operation = 'storage_inode_identity'
+        database = directory / 'blackbox.sqlite3'
+        if (not directory.is_dir() or directory.stat().st_ino != identity['directory_inode']
+                or database.is_symlink() or database.stat().st_ino != identity['database_inode']):
+            raise OSError('storage directory or database was replaced')
+        return directory
+    except Exception as exc:
+        mark_operation(exc, operation)
+        raise
 
 
 def initialize(directory, expected_mount):
