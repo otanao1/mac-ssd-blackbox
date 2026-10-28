@@ -16,6 +16,10 @@ Viewerの開発・保守で再利用する技術メモです。ビルドと基�
 更新モデルはアプリのStateObjectが所有し、ウィンドウの表示・非表示に結び付けません。
 ウィンドウを閉じても更新を継続し、プロセス終了で更新を停止します。別の常駐ヘルパーはありません。
 
+## 日付別Incident・Scan画面
+
+Issue #34の「今日の状況」は `TodayData.swift`・`TodayReader.swift`・`TodayView.swift` に分離。既存Dashboard・Widgetと同じ保存先の読取保護を `DatabaseReader.withSource` で共有し、日付別取得の失敗を既存Dashboardの成功/失敗へ混在させない。表示規則・検証方法は[今日の状況](today-viewer.md)を参照。
+
 ## Personal TeamとApp Group
 
 現行の[Config.xcconfig](../viewer/Config.xcconfig)は、Git管理外の `Local.xcconfig` からTeamを受け取り、

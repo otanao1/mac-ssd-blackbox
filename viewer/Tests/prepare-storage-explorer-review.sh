@@ -7,6 +7,7 @@ app="$output/StorageExplorerReview.app"
 mkdir -p "$app/Contents/MacOS"
 xcrun swiftc -swift-version 5 -module-cache-path local/issue31/ModuleCache -parse-as-library \
   viewer/Shared/*.swift viewer/App/StorageExplorerData.swift viewer/App/DatabaseReader.swift \
+  viewer/App/TodayData.swift viewer/App/TodayReader.swift viewer/App/TodayView.swift \
   viewer/App/ViewerModel.swift viewer/App/ViewerDetail.swift \
   viewer/Tests/StorageExplorerFixture.swift viewer/Tests/StorageExplorerGUIReview.swift \
   -o "$app/Contents/MacOS/StorageExplorerReview"

@@ -50,7 +50,22 @@ struct LegendFlow: Layout {
 struct ViewerDetail: View {
     @ObservedObject var model: ViewerModel
     @State private var change = false
+    @State private var showingToday = false
     var body: some View {
+        ZStack {
+            // Keep Dashboard/Explorer selection and scroll state while visiting Today.
+            dashboardDetail.opacity(showingToday ? 0 : 1)
+                .allowsHitTesting(!showingToday).accessibilityHidden(showingToday)
+            if showingToday { TodayView(model: model) }
+        }.frame(minWidth: 600, minHeight: 380)
+            .onOpenURL { url in
+                if url.scheme == "blackbox-viewer", url.host == "l1" { showingToday = false }
+            }
+            .toolbar { ToolbarItem {
+                Button(showingToday ? "Dashboardへ" : "今日の状況") { showingToday.toggle() }
+            } }
+    }
+    private var dashboardDetail: some View {
         ScrollViewReader { outer in
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
