@@ -115,6 +115,40 @@ class DuTest(unittest.TestCase):
         rows=[];scanner.run([str(self.tree)],'L2',{},rows.append)
         self.assertEqual(rows[0]['status'],'excluded')
 
+    def test_two_explicit_internal_volumes_keep_nested_mount_excluded(self):
+        update, vm = self.tree/'Update', self.tree/'VM'
+        for root, size in ((update, 4096), (vm, 8192)):
+            (root/'payload').mkdir(parents=True)
+            (root/'payload'/'file').write_bytes(b'x'*size)
+        foreign = update/'foreign'
+        foreign.mkdir()
+        (foreign/'not-scanned').write_bytes(b'x'*16384)
+        checked = []
+        def device_check(path):
+            checked.append(path)
+            return os.stat(path).st_dev
+        scanner = DuScanner(self.db, device_check=device_check,
+                            mounts=lambda: {str(update), str(vm), str(foreign)})
+        rows = []
+        with patch.object(scanner, '_du', wraps=scanner._du) as run:
+            scanner.run([str(self.tree)+'/*', str(update)+'/*', str(vm)+'/*'],
+                        'L2', {}, rows.append)
+        by = {r['path']: r for r in rows}
+        self.assertCountEqual(checked, [str(self.tree), str(update), str(vm)])
+        for root in (update, vm):
+            self.assertEqual(by[str(root)]['status'], 'ok')
+            self.assertEqual(by[str(root)]['bytes'], root.stat().st_blocks*512
+                             + by[str(root/'payload')]['bytes'])
+        self.assertEqual(by[str(foreign)]['status'], 'excluded')
+        self.assertNotIn(str(foreign/'not-scanned'), by)
+        operands = [p for call in run.call_args_list for p in call.args[0]]
+        self.assertTrue(operands)
+        self.assertTrue(all(p != str(foreign) and not p.startswith(str(foreign)+'/')
+                            and not str(foreign).startswith(p+'/') for p in operands))
+        self.assertEqual(by[str(self.tree)]['bytes'], self.tree.stat().st_blocks*512
+                         + by[str(self.child)]['bytes']
+                         + (self.tree/'direct').stat().st_blocks*512)
+
     def test_cancel_before_du(self):
         count=0
         def cancelled():
