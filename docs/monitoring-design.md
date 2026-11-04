@@ -27,28 +27,8 @@ L2・L3・L9は共通の要求・履歴・排他基盤を使う。同じスキ�
 
 ### L2（日次・広域）の共通対象
 
-```text
-~/*
-~/Library/*
-~/Library/Application Support/*
-/Users/*
-/Library/*
-/Library/Application Support/*
-/opt/*
-/opt/homebrew/*
-/opt/homebrew/Cellar/*
-/usr/local/*
-/private/var/*
-/cores
-~/Library/Developer/Xcode/DerivedData
-~/Library/Caches/Homebrew
-/private/tmp/*
-/Applications/*
-/System/Volumes/VM/*
-/System/Volumes/Update/*
-/usr/*
-~/Library/CloudStorage/*
-```
+L2の共通対象は[config/l2/conf.d/](../config/l2/conf.d/)で管理する。
+具体的な対象は共通設定の[common.conf](../config/l2/conf.d/common.conf)を参照する。
 
 `/System/*`、`/bin`、`/sbin`、`/dev` は初期対象外。VM指定は暫定。全データの網羅は保証しない。
 
