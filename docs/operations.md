@@ -290,3 +290,105 @@ L9の論理容量は取得せずNULL、ハードリンクはL2/L3と同じ各パ
 切り替えに追加の列・テーブル・履歴削除は不要（PR #17でscan_version列を導入済みの環境）。旧履歴・Incidentと論理容量列は保持する。新方式の初回は比較元なしとなり得る。Merge後のruntime反映・監視の停止再開・バックアップ・実機検証は別途承認された運用作業とし、本PRでは行わない。設定・保存先・Viewer/Widget・launchd登録の変更は不要。復旧時は整合したバックアップと旧runtimeを用意し、新旧方式の履歴を混ぜて比較しない。
 
 合成比較・DB競合検証は `.venv/bin/python -B tools/verify_l9_du.py`。OS標準tmp内の5,000ファイル×2形状だけを生成し、終了時にfixture・DBを削除する。CLIの広域設定や本番保存先は使用しない。旧Scannerは合成比較用の参照実装としてのみ残し、通常workerは全層DuScannerを使う。
+
+## Viewer同梱の監視ヘルパー（#38）
+
+同梱版は `BlackboxViewer.app/Contents/Helpers/Blackbox Monitor.app` 内の
+ネイティブ実行ファイルがPython 3.11と監視コードを埋め込み起動する。
+共有Python、ユーザーsite-packages、`PYTHONPATH`、カレントディレクトリのモジュールは使用しない。
+起動前にヘルパーの署名・封印されたリソースを検証する。workerも同じ実行ファイルから起動し、
+既存のworker→du、保存先照合、切断時の記録停止、排他・子の回収、error/partial/excludedを維持する。
+
+ViewerとWidgetのデータ共有・署名・Bundle IDは既定で従来どおり。
+監視ヘルパーにApp Groupやsandbox例外entitlementは付与しない。
+Viewerの終了は監視を停止しないが、従来どおりWidget表示キャッシュの更新は停止する。
+この実装をビルドしただけでは、既存インストールやFDA設定は変わらない。
+
+### ビルドと導入
+
+署名済みViewerの**コピー**へ同梱する。ビルド入力のPython・全依存ライブラリが
+対象OS・アーキテクチャと互換である必要がある。ビルド手順は
+[Viewer開発メモ](project-development-viewer-notes.md#監視ヘルパーの同梱ビルド)を参照。
+通常のXcodeビルドだけではPythonを同梱しない。
+
+```sh
+./scripts/setup.sh --app-bundle '/path/to/BlackboxViewer.app' \
+  --storage '/path/to/existing-data' --mount '/actual/mount'
+```
+
+このモードはセットアップにも共有Pythonを必要としない。登録しない限り監視を開始しない。
+runtimeには共通Config・plistだけを置き、実行コードは署名済みアプリ内を参照する。
+ローカル設定、制御socket、CLI、DBの配置と保存先識別は従来方式と共通。
+アプリは移動・直接上書きせず、更新用CLIを使う。
+ログイン時の起動は従来どおり `--register` によるユーザーLaunchAgentで行う。
+Viewer自身の自動起動とは独立し、ログイン前の監視は行わない。
+
+既存Python方式からの移行は、保存先・設定・復旧用runtimeを確認し、停止・uninstall（設定保持）後、
+同じruntime/CLI/設定/データを指定して同梱版をinstallする。
+DBの新規作成や保存先識別値の手修正は不要。移行・サービス操作は別途承認の対象である。
+
+### FDA設定と確認
+
+システム設定の「プライバシーとセキュリティ」→「フルディスクアクセス」で、
+実際に配置したBlackbox Viewer.appをユーザーが追加する。共有PythonへのFDAは不要。
+設定後は対象の監視ジョブを停止・再開して、Bluetooth・Mail等の合意した少数対象を確認する。
+FDA ONでもUnix権限やmacOS固有の制限をすべて回避できる保証はない。sudoは通常運用に導入しない。
+FDAがViewer側の実行主体として扱われる可能性があるため、ヘルパーだけに限定された権限とは説明しない。
+Widgetは引き続きsandboxと既存entitlementsを維持し、監視DBを直接読まない。
+正式実装についてのFDA OFF/ON・Widget実表示・再ログイン確認は、試作の成功実績とは別に受け入れる。
+
+### 更新・復旧
+
+Viewerを通常終了してから、同じBundle ID・署名要件・対応OSの候補を別の場所に用意する。
+
+```sh
+bb update-app '/path/to/candidate/BlackboxViewer.app'
+```
+
+署名済み一時コピーから更新処理を実行する。候補の署名・Hardened Runtime・指定要件、
+既存plistと実ジョブの所有関係、保存先識別を確認してから、所有するジョブだけをbootoutする。
+service/monitor/scanロック解放で旧監視とworkerの終了を確認し、アプリと共通Configを置換する。
+停止前にロードされていたジョブだけを再開する。更新中は観測の空白が生じる。
+ローカル設定・DB・inode・履歴は保持し、過去履歴の再計算は行わない。
+共通Configへ直接編集がある場合は更新を拒否する。変更は従来のprivate conf.d等の上書きとして管理する。
+
+旧アプリは同じ親の `BlackboxViewer.app.previous`、旧共通設定はruntimeの `config.previous` に保持する。
+既存バックアップを上書きしない。通常の置換失敗では旧アプリ・共通設定を復元する。
+停止後の所有関係・保存先・ロック確認で失敗した場合は、安全のため停止状態を維持する。
+再開失敗時も自動でプロセスを強制終了したりDBを修復しない。状態と原因を確認してから再開する。
+
+復旧には、同じコマンドに保持した `.previous` アプリを指定する。置換前のアプリ・共通設定を
+それぞれ `.replaced`、`config.replaced` として残す。DBスキーマ変更を伴う将来の更新では、
+別途互換性とDBバックアップの復旧手順を確認する。
+アプリとruntimeの両方へ書き込める同一ユーザーが実行し、sudoによる権限回避は行わない。
+更新後は署名・監視PID・観測の進行・FDA対象の取得・Viewer/Widgetを確認する。
+署名要件を維持してもFDA維持をすべてのOS・署名・配布方法で保証するものではない。
+
+### アンインストールと開発用の分離
+
+`bb uninstall` または `BLACKBOX_CLI=/path/to/installed/cli ./scripts/uninstall.sh` は
+所有する監視ジョブ・runtime・CLIを除去する。DB・履歴・Viewer.appは削除しない。
+ローカル設定削除は既存の `--remove-configuration` による明示操作。
+FDAの取り消し、Widget配置削除、アプリ・コンテナ削除は別の操作として対象を確認する。
+
+開発版は `.dev.issue38` 等のBundle ID・表示名・App Group・URL scheme・Widget kindを指定し、
+独立したprivate/runtime/CLI/合成DBを使う。開発版のLaunchAgent名はそのBundle IDに `.monitor` を付け、
+本番ジョブ名を使わない。開発版では本番の既定private/runtime/CLI指定を拒否する。
+実行前にConfigを確認し、小規模検証では広域共通対象をprivate側の空ファイルで無効にする。
+
+### Scan取得範囲の確認
+
+1. `bb history --layer L2`（またはL3）でScan ID、実行時刻、保存済み`targets`・`options`を確認する。
+2. `bb results SCAN_ID`で成功・error/partial・境界除外を照合する。親子の容量を単純合算しない。
+3. `bb config`で現在ロードされた設定ファイルとconf.dを確認する。現在の設定と過去Scanは同一とは限らない。
+4. 保存済み対象と当時のConfigのGit履歴、[対象外理由](core-runtime.md#scan取得範囲と対象外)を照合する。
+
+共通対象はConfigを正本とし、docsへ全対象・対象数を重複記載しない。
+Updateの共通設定追加（PR #43）と、本番への配布・reloadは別である。
+
+権限比較の既存記録では、代表2領域はTerminalのFDA OFF/ONで取得可否が変わり、
+DaisyDisk通常Scan＋FDA ONでも取得できた。launchd経由の共有Python実体へのFDAと、
+Python同梱ヘルパーの試作でも改善を確認したが、今回の正式実装の受入とは区別する。
+過去のsudo検証は条件別・領域別の根拠を十分に再構成できず、DaisyDiskの管理者Scan後も
+隠し領域が残った。sudo・管理者Scanで全領域が取得できるとは判断しない。
+全エラーの解消率やL1/L2差の説明率は、この代表例から算出しない。根拠と限界は[Issue #38](https://github.com/otanao1/mac-ssd-blackbox/issues/38)を参照。

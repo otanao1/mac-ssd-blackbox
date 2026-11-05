@@ -11,11 +11,19 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<string>$(BLACKBOX_WIDGET_DISPLAY_NAME)</string>
+	<key>CFBundleDisplayName</key>
+	<string>$(BLACKBOX_WIDGET_DISPLAY_NAME)</string>
+	<key>BlackboxWidgetTitle</key>
+	<string>$(BLACKBOX_WIDGET_TITLE)</string>
+	<key>BlackboxWidgetKind</key>
+	<string>$(BLACKBOX_WIDGET_KIND)</string>
+	<key>BlackboxURLScheme</key>
+	<string>$(BLACKBOX_URL_SCHEME)</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1</string>
+	<string>$(BLACKBOX_MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>3</string>
+	<string>$(BLACKBOX_BUILD_VERSION)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>BlackboxAppGroup</key>

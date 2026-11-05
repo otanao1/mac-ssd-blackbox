@@ -95,7 +95,7 @@ struct BlackboxWidget: Widget {
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: L1Provider()) { entry in L1WidgetView(entry: entry) }
-            .configurationDisplayName("SSD空き容量")
+            .configurationDisplayName(Bundle.main.object(forInfoDictionaryKey: "BlackboxWidgetTitle") as? String ?? "SSD空き容量")
             .description("BlackboxのL1履歴を表示します。Viewer常駐中にデータを更新します。")
             .supportedFamilies([.systemSmall, .systemMedium])
     }

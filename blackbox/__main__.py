@@ -47,17 +47,23 @@ def main():
     incident.add_argument('--limit', type=int, default=20)
     setup = sub.add_parser('install')
     setup.add_argument('--storage', type=Path, required=True, help='existing private storage directory')
+    setup.add_argument('--config-dir', type=Path, default=argparse.SUPPRESS,
+                       help='private configuration (also accepted before install)')
     setup.add_argument('--mount', type=Path, required=True, help='explicitly confirmed mount point')
     from .installation import DEFAULT_RUNTIME, DEFAULT_CLI
     setup.add_argument('--runtime', type=Path, default=DEFAULT_RUNTIME)
     setup.add_argument('--cli', type=Path, default=DEFAULT_CLI)
     setup.add_argument('--register', action='store_true', help='place LaunchAgent and bootstrap (starts monitoring)')
+    setup.add_argument('--app-bundle', type=Path, help='signed Viewer containing this monitor helper')
+    update = sub.add_parser('update-app', help='replace installed signed Viewer; quit Viewer first')
+    update.add_argument('candidate', type=Path)
+    update.add_argument('--coordinator', action='store_true', help=argparse.SUPPRESS)
     remove = sub.add_parser('uninstall')
     remove.add_argument('--remove-configuration', action='store_true')
     args = parser.parse_args()
     if not args.data:
         return installed(args)
-    if args.command in ('start', 'stop', 'reload', 'config', 'install', 'uninstall', 'periodic-l2'):
+    if args.command in ('start', 'stop', 'reload', 'config', 'install', 'uninstall', 'periodic-l2', 'update-app'):
         parser.error('this command requires installed configuration, without --data')
     if args.command == 'run':
         config = json.loads(args.config.read_text()) if args.config else {}
@@ -132,11 +138,27 @@ def history(store, layer, limit):
 
 def installed(args):
     from .configuration import load
-    from .installation import control, install, uninstall
+    from .installation import control, install, uninstall, VIEWER_ID
     from .service import call, run
+    if Path(sys.executable).name == 'BlackboxMonitor':
+        import plistlib
+        from .configuration import DEFAULT_PRIVATE
+        own_app = Path(sys.executable).resolve().parents[5]
+        own_id = plistlib.loads((own_app/'Contents/Info.plist').read_bytes())['CFBundleIdentifier']
+        if own_id != VIEWER_ID:
+            if Path(args.config_dir).expanduser().resolve() == DEFAULT_PRIVATE.resolve():
+                raise ValueError('development helper requires a separate --config-dir')
+            if args.command != 'install':
+                manifest = json.loads((args.config_dir/'installation.json').read_text())
+                if manifest.get('bundle_id') != own_id:
+                    raise ValueError('configuration belongs to another application')
     if args.command == 'install':
         output = install(Path(__file__).resolve().parent.parent, args.storage, args.mount,
-                         private=args.config_dir, runtime=args.runtime, cli=args.cli, register=args.register)
+                         private=args.config_dir, runtime=args.runtime, cli=args.cli, register=args.register,
+                         app_bundle=args.app_bundle)
+    elif args.command == 'update-app':
+        from .bundle import update
+        output = update(args.config_dir, args.candidate, coordinator=args.coordinator)
     elif args.command == 'uninstall':
         output = uninstall(args.config_dir, remove_configuration=args.remove_configuration)
     elif args.command in ('start', 'stop'):
@@ -200,6 +222,6 @@ def installed(args):
 if __name__ == '__main__':
     try:
         main()
-    except (OSError, sqlite3.Error, subprocess.SubprocessError, ValueError, TypeError, KeyError) as exc:
+    except (OSError, sqlite3.Error, subprocess.SubprocessError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         print(json.dumps(dict(error=str(exc))), file=sys.stderr)
         sys.exit(1)

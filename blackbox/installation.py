@@ -15,6 +15,7 @@ from .configuration import DEFAULT_PRIVATE
 from .destination import initialize
 
 LABEL = 'io.github.otanao1.mac-ssd-blackbox'
+VIEWER_ID = 'io.github.otanao1.blackbox-viewer'
 DEFAULT_RUNTIME = Path.home() / 'Library/Application Support/mac-ssd-blackbox-runtime'
 DEFAULT_CLI = Path.home() / '.local/bin/mac-ssd-blackbox'
 
@@ -27,11 +28,45 @@ def domain():
     return f'gui/{os.getuid()}'
 
 
+def installation_label(manifest):
+    if manifest.get('mode') != 'bundle':
+        return LABEL
+    ident = manifest['bundle_id']
+    if ident == VIEWER_ID:
+        return LABEL
+    if not re.fullmatch(re.escape(VIEWER_ID)+r'\.dev\.issue[0-9]+', ident):
+        raise ValueError('development bundle identity must identify its Issue')
+    return ident+'.monitor'
+
+
 def control(action, private):
+    manifest = json.loads((Path(private)/'installation.json').read_text())
+    if manifest.get('mode') == 'bundle':
+        from .runtime import lock
+        owner = lock(private, 'update.lock')
+        try:
+            return _control(action, private)
+        finally:
+            os.close(owner)
+    return _control(action, private)
+
+
+def _control(action, private):
     manifest = json.loads((Path(private) / 'installation.json').read_text())
     plist = Path(manifest['agent'])
-    target = domain()+'/'+LABEL
+    label = installation_label(manifest)
+    target = domain()+'/'+label
     if action == 'start':
+        if manifest.get('mode') == 'bundle':
+            from .bundle import verify_bundle
+            verify_bundle(Path(manifest['app']))
+            expected = uninstall_job(private, manifest)
+            loaded = owned_job(target, expected, plist)
+            if not loaded:
+                launchctl('bootstrap', domain(), str(plist))
+            else:
+                launchctl('kickstart', target)
+            return dict(action=action, label=label)
         if launchctl('print', target, check=False).returncode:
             launchctl('bootstrap', domain(), str(plist))
         else:
@@ -39,11 +74,11 @@ def control(action, private):
     elif action == 'stop':
         expected = uninstall_job(private, manifest)
         stop_owned_job(target, expected, plist)
-    return dict(action=action, label=LABEL)
+    return dict(action=action, label=label)
 
 
-def plist_bytes(python, runtime, private):
-    return plistlib.dumps(dict(Label=LABEL,
+def plist_bytes(python, runtime, private, label=LABEL):
+    return plistlib.dumps(dict(Label=label,
         ProgramArguments=[str(python), '-m', 'blackbox', '--config-dir', str(private),
                           '--common-dir', str(Path(runtime)/'config'), 'run'],
         WorkingDirectory=str(runtime), RunAtLoad=True,
@@ -59,11 +94,16 @@ def uninstall_job(private, manifest):
     for path in (runtime, private):
         if not path.is_absolute() or path.resolve() != path or any(c in str(path) for c in '\r\n\t'):
             raise ValueError('cannot verify installation paths')
-    expected = plistlib.loads(plist_bytes(runtime/'venv/bin/python', runtime, private))
+    python = runtime/'venv/bin/python'
+    if manifest.get('mode') == 'bundle':
+        from .bundle import helper_path
+        python = helper_path(Path(manifest['app']))
+    label = installation_label(manifest)
+    expected = plistlib.loads(plist_bytes(python, runtime, private, label))
     agent = Path(manifest['agent'])
     if type(manifest['registered']) is not bool:
         raise ValueError('invalid installation registration state')
-    intended = (Path.home()/'Library/LaunchAgents'/(LABEL+'.plist') if manifest['registered']
+    intended = (Path.home()/'Library/LaunchAgents'/(label+'.plist') if manifest['registered']
                 else runtime/'launchd.plist')
     if agent != intended or agent.is_symlink():
         raise ValueError('cannot verify installation plist path')
@@ -96,7 +136,7 @@ def owned_job(target, expected, agent):
     """
     result = launchctl('print', target, check=False)
     if result.returncode:
-        missing = f'Could not find service "{LABEL}" in domain for user gui: {os.getuid()}'
+        missing = f'Could not find service "{expected["Label"]}" in domain for user gui: {os.getuid()}'
         if result.returncode == 113 and result.stderr.strip() in (missing, 'Bad request.\n'+missing):
             return False
         raise ValueError('cannot determine launchd job ownership; nothing stopped or removed')
@@ -154,16 +194,26 @@ def stop_owned_job(target, expected, agent):
 
 
 def install(source, directory, mount, *, private=DEFAULT_PRIVATE, runtime=DEFAULT_RUNTIME,
-            cli=DEFAULT_CLI, register=False):
+            cli=DEFAULT_CLI, register=False, app_bundle=None):
     source = Path(source).resolve(strict=True)
     private, runtime, cli = (Path(p).expanduser().resolve() for p in (private, runtime, cli))
     from .service import address
     address(private)
     if sys.version_info < (3, 11):
         raise ValueError('Python 3.11 or later is required')
+    if Path(sys.executable).name == 'BlackboxMonitor' and app_bundle is None:
+        raise ValueError('the monitor helper requires install --app-bundle')
     # Refuse destructive replacement or overlap with data/the source checkout.
     data = Path(directory).expanduser().resolve(strict=True)
-    locations = [source, data, private, runtime, cli]
+    app = None
+    bundle_info = None
+    if app_bundle is not None:
+        from .bundle import verify_bundle, helper_path
+        app = Path(app_bundle).expanduser().resolve(strict=True)
+        bundle_info = verify_bundle(app)
+        if source != helper_path(app).parents[1]/'Resources/runtime' or Path(sys.executable).resolve() != helper_path(app):
+            raise ValueError('bundle install must run its own signed helper')
+    locations = [app or source, data, private, runtime, cli]
     for index, left in enumerate(locations):
         for right in locations[index+1:]:
             if left.is_relative_to(right) or right.is_relative_to(left):
@@ -178,7 +228,12 @@ def install(source, directory, mount, *, private=DEFAULT_PRIVATE, runtime=DEFAUL
         retained = json.loads((private/'local.json').read_text())
         from .destination import verify
         verify(retained['storage'])
-    agent = Path.home() / 'Library/LaunchAgents' / (LABEL+'.plist')
+    bundle_manifest = dict(mode='bundle', app=str(app), bundle_id=bundle_info['CFBundleIdentifier']) if app else {}
+    label = installation_label(bundle_manifest)
+    if label != LABEL and any(path == default.expanduser().resolve() for path, default in
+            ((private, DEFAULT_PRIVATE), (runtime, DEFAULT_RUNTIME), (cli, DEFAULT_CLI))):
+        raise ValueError('development bundle requires separate configuration, runtime and CLI paths')
+    agent = Path.home() / 'Library/LaunchAgents' / (label+'.plist')
     if register and agent.exists():
         raise ValueError('LaunchAgent already exists')
     identity = initialize(data, mount)
@@ -186,16 +241,19 @@ def install(source, directory, mount, *, private=DEFAULT_PRIVATE, runtime=DEFAUL
         raise ValueError('storage identity changed; retained configuration was not replaced')
     runtime.mkdir(mode=0o700, parents=True)
     private.mkdir(mode=0o700, parents=True, exist_ok=retained is not None)
-    for name in ('blackbox', 'config'):
+    for name in (('config',) if app else ('blackbox', 'config')):
         shutil.copytree(source/name, runtime/name, ignore=shutil.ignore_patterns('__pycache__', '*.pyc', 'local*.json'))
     # No packages/network/global Python changes; isolate an existing supported interpreter.
-    subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(runtime/'venv')], check=True)
-    python = runtime/'venv/bin/python'
+    if app:
+        python = helper_path(app)
+    else:
+        subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(runtime/'venv')], check=True)
+        python = runtime/'venv/bin/python'
     if retained is None:
         (private/'local.json').write_text(json.dumps(dict(storage=identity), indent=2)+'\n')
     os.chmod(private/'local.json', 0o600)
     prepared = runtime/'launchd.plist'
-    prepared.write_bytes(plist_bytes(python, runtime, private))
+    prepared.write_bytes(plist_bytes(python, runtime, private, label))
     cli.parent.mkdir(parents=True, exist_ok=True)
     cli.write_text('#!/bin/sh\ncd '+shlex.quote(str(runtime))+' || exit 1\nexec '+shlex.quote(str(python))+
                    ' -m blackbox --config-dir '+shlex.quote(str(private))+' --common-dir '+
@@ -203,6 +261,8 @@ def install(source, directory, mount, *, private=DEFAULT_PRIVATE, runtime=DEFAUL
     cli.chmod(0o700)
     manifest = dict(runtime=str(runtime), cli=str(cli), agent=str(agent if register else prepared),
                     registered=register, data=str(data))
+    if app:
+        manifest.update(bundle_manifest)
     (private/'installation.json').write_text(json.dumps(manifest, indent=2)+'\n')
     if register:
         agent.parent.mkdir(parents=True, exist_ok=True)
@@ -227,6 +287,18 @@ def acquire_stopped_service(private, wait):
 
 
 def uninstall(private, *, remove_configuration=False):
+    manifest = json.loads((Path(private)/'installation.json').read_text())
+    if manifest.get('mode') == 'bundle':
+        from .runtime import lock
+        owner = lock(private, 'update.lock')
+        try:
+            return _uninstall(private, remove_configuration=remove_configuration)
+        finally:
+            os.close(owner)
+    return _uninstall(private, remove_configuration=remove_configuration)
+
+
+def _uninstall(private, *, remove_configuration=False):
     private = Path(private).expanduser().absolute()
     manifest = json.loads((private/'installation.json').read_text())
     runtime, cli, agent = (Path(manifest[key]) for key in ('runtime', 'cli', 'agent'))
@@ -237,7 +309,7 @@ def uninstall(private, *, remove_configuration=False):
         if path.is_relative_to(runtime) or runtime.is_relative_to(path):
             raise ValueError('runtime overlaps protected configuration/data')
     expected = uninstall_job(private, manifest)
-    stopped = stop_owned_job(domain()+'/'+LABEL, expected, agent)
+    stopped = stop_owned_job(domain()+'/'+installation_label(manifest), expected, agent)
     # bootout can return before the service finishes closing children/DB/socket.
     # service.run releases this lock only after all of that cleanup. A successful
     # owned bootout permits a bounded wait; an unrelated foreground run does not.
