@@ -21,8 +21,46 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from blackbox.bundle import helper_path, verify_bundle
+from blackbox.configuration import load
 from blackbox.destination import mounted_volume
 from blackbox.runtime import lock
+
+
+def require_no_periodic_targets(common, private):
+    """Use the real loader; never allow optimized Python to skip this guard."""
+    targets = load(common, private)['targets']
+    if any(targets[layer] for layer in ('L2', 'L3')):
+        raise ValueError('verification requires zero periodic L2/L3 targets; nothing started')
+    return {layer: len(targets[layer]) for layer in ('L2', 'L3')}
+
+
+def prepare_test_configuration(common, private, fixture, *, other_common=()):
+    """Mask every conf name, including future update/rollback defaults."""
+    common, private = Path(common), Path(private)
+    sources = [common, *map(Path, other_common)]
+    for layer in ('l2', 'l3'):
+        directory = private/layer/'conf.d'
+        if directory.is_symlink():
+            raise ValueError('verification conf.d must not be a symbolic link')
+        directory.mkdir(parents=True, exist_ok=True)
+        names = {p.name for root in sources+[private] for p in (root/layer/'conf.d').glob('*.conf')}
+        for name in names:
+            destination = directory/name
+            if destination.is_symlink():
+                raise ValueError('verification conf must not be a symbolic link')
+            destination.write_text('')
+    local_file = private/'local.json'
+    if local_file.is_symlink():
+        raise ValueError('verification local.json must not be a symbolic link')
+    local = json.loads(local_file.read_text())
+    local.update(l1_path=str(fixture), intervals={'L1': .2}, targets={'L2': [], 'L3': []})
+    local_file.write_text(json.dumps(local))
+    for root in sources:
+        require_no_periodic_targets(root, private)
+
+
+def bundle_config(app):
+    return helper_path(app).parents[1]/'Resources/runtime/config'
 
 
 def verify(app, candidate=None):
@@ -34,6 +72,11 @@ def verify(app, candidate=None):
         assert hashlib.sha256((helper_root/relative).read_bytes()).hexdigest() == digest, relative
     if info['CFBundleIdentifier'] != 'io.github.otanao1.blackbox-viewer.dev.issue38':
         raise ValueError('only the DEV Issue38 application is accepted')
+    if candidate:
+        candidate = Path(candidate).expanduser().resolve(strict=True)
+        candidate_info = verify_bundle(candidate, reference=app)
+        if candidate_info['CFBundleIdentifier'] != info['CFBundleIdentifier']:
+            raise ValueError('candidate must be the same DEV Issue38 application')
     with tempfile.TemporaryDirectory(prefix='blackbox-issue38-') as tmp:
         root = Path(tmp).resolve()
         source_app = app
@@ -53,20 +96,16 @@ def verify(app, candidate=None):
             p = subprocess.run([str(helper), *map(str, args)], capture_output=True, text=True,
                                check=True, env=env, cwd=poison, timeout=40)
             return json.loads(p.stdout)
-        installed = call('--config-dir', private, 'install', '--app-bundle', app,
+        call('--config-dir', private, 'install', '--app-bundle', app,
                          '--storage', data, '--mount', mounted_volume(data)['mount'],
                          '--runtime', runtime, '--cli', root/'bb')
         expected_label = info['CFBundleIdentifier']+'.monitor'
         assert plistlib.loads((runtime/'launchd.plist').read_bytes())['Label'] == expected_label
-        # Empty replacement files disable bundled broad targets; only our fixture is scanned.
-        for layer in ('l2', 'l3'):
-            directory = private/layer/'conf.d'; directory.mkdir(parents=True)
-            (directory/'common.conf').write_text('')
-        local = json.loads((private/'local.json').read_text())
-        local.update(l1_path=str(fixture), intervals={'L1': .2})
-        (private/'local.json').write_text(json.dumps(local))
+        prepare_test_configuration(runtime/'config', private, fixture,
+                                   other_common=[bundle_config(candidate)] if candidate else [])
         before = (data/'blackbox.sqlite3').stat().st_ino
         base = ['--config-dir', private, '--common-dir', runtime/'config']
+        periodic_counts = require_no_periodic_targets(runtime/'config', private)
         process = subprocess.Popen([str(helper), *map(str, base), 'run'], env=env, cwd=poison,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         try:
@@ -99,13 +138,11 @@ def verify(app, candidate=None):
         assert (data/'blackbox.sqlite3').stat().st_ino == before
         updated = False
         if candidate:
-            candidate = Path(candidate).expanduser().resolve(strict=True)
-            info = verify_bundle(candidate, reference=app)
-            if info['CFBundleIdentifier'] != installed['bundle_id']:
-                raise ValueError('candidate must be the same DEV Issue38 application')
+            require_no_periodic_targets(bundle_config(candidate), private)
             result = call(*base, 'update-app', candidate)
             assert result['updated'] and not result['restarted']
             assert (data/'blackbox.sqlite3').stat().st_ino == before
+            require_no_periodic_targets(bundle_config(result['backup']), private)
             result = call(*base, 'update-app', result['backup'])
             assert result['updated'] and not result['restarted']
             updated = True
@@ -120,6 +157,7 @@ def verify(app, candidate=None):
                     bundle_install=True, production_label_used=False, native_worker_scan='succeeded',
                     scan_files=32, graceful_stop=True, locks_released=True, database_inode_preserved=True,
                     signed_update_and_rollback=updated, tampered_resources_rejected=True,
+                    periodic_targets_before_start=periodic_counts,
                     fda_on_tested=False, launchd_tested=False, viewer_widget_started=False,
                     temporary_files_removed=True)
 
@@ -151,12 +189,8 @@ def verify_launchd(app, candidate):
             return json.loads(result.stdout)
         call('install', '--app-bundle', local_app, '--storage', data,
              '--mount', mounted_volume(data)['mount'], '--runtime', runtime, '--cli', root/'bb')
-        for layer in ('l2', 'l3'):
-            directory = private/layer/'conf.d'; directory.mkdir(parents=True)
-            (directory/'common.conf').write_text('')
-        local = json.loads((private/'local.json').read_text())
-        local.update(l1_path=str(fixture), intervals={'L1': .2})
-        (private/'local.json').write_text(json.dumps(local))
+        prepare_test_configuration(runtime/'config', private, fixture,
+                                   other_common=[bundle_config(candidate)])
         before = (data/'blackbox.sqlite3').stat().st_ino
         def wait_status(running):
             deadline = time.monotonic()+20
@@ -171,6 +205,7 @@ def verify_launchd(app, candidate):
                 if status.get('running', False) == running: return status
                 time.sleep(.1)
             raise TimeoutError('isolated launchd status')
+        periodic_counts = require_no_periodic_targets(runtime/'config', private)
         may_be_loaded = True
         call('start')
         first = wait_status(True)
@@ -182,10 +217,12 @@ def verify_launchd(app, candidate):
             if time.monotonic() > deadline: raise TimeoutError('isolated launchd worker')
             time.sleep(.1)
         assert scan['state'] == 'succeeded'
+        require_no_periodic_targets(bundle_config(candidate), private)
         update = call('update-app', candidate)
         assert update['restarted']
         second = wait_status(True)
         assert first['pid'] != second['pid']
+        require_no_periodic_targets(bundle_config(update['backup']), private)
         restored = call('update-app', update['backup'])
         assert restored['restarted']
         third = wait_status(True)
@@ -202,6 +239,7 @@ def verify_launchd(app, candidate):
                     running_rollback=True, pid_changed_each_restart=True, database_inode_preserved=True,
                     uninstall_preserves_data=True, production_label_used=False,
                     persistent_launchagent_written=False, fda_on_tested=False, relogin_tested=False,
+                    periodic_targets_before_start=periodic_counts,
                     temporary_files_removed=True)
     finally:
         if may_be_loaded:

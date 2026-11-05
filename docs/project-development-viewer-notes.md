@@ -221,6 +221,10 @@ xcodebuild -project viewer/BlackboxViewer.xcodeproj -scheme BlackboxViewer \
 ```
 
 `tools/verify_monitor_bundle.py --app '/path/to/dev/app'` はDEV Issue38だけを受け付ける。
+共通confと同名の全ファイル（L3の用途別ファイルを含む）と既存の検証用confを空にし、
+JSONのL2/L3対象配列も空にする。更新候補で増えるconf名も起動前に無効化する。
+実際の設定ローダーでL2/L3とも対象0件を確認し、対象が残ればforeground起動・bootstrapを中断する。
+更新・復旧で自動再開する前も、候補の共通設定と検証用設定を同じローダーで確認する。
 一時領域の32ファイル・合成DB・独立設定で同梱CLI/worker/duと正常終了・ロック解放を確認し、
 生成した一時領域を削除する。FDA変更・launchd登録・Viewer起動・Widget登録は行わない。
 `--candidate` を追加すると署名済み候補への停止中の更新・復旧も行う。
@@ -237,5 +241,8 @@ arm64 Releaseビルド、79コードオブジェクトの同梱・署名・Harde
 32ファイルのfixtureによる実worker/du、外部Python環境の無視、改変リソースの起動拒否、
 停止中および一時launchdジョブ稼働中の更新・復旧、再開PIDの変更、DB inode保持、
 uninstall後のデータ保持を確認した。本番Config/DB/監視・正式Viewer/Widgetは変更していない。
-FDA OFF/ON、Viewerメニュー終了、実Widget共有・表示、再ログインは正式実装では未確認。
-試作の成功記録でこれらの受入を代替しない。
+前記検証時点ではFDA OFF/ON、Viewerメニュー終了、実Widget共有・表示、再ログインは未確認だった。
+その後の[限定FDA比較](https://github.com/otanao1/mac-ssd-blackbox/issues/38#issuecomment-6650225080)では、
+検証コピーのBluetooth・MailについてON成功／OFF EPERMとerror/partial保存を確認した。
+取得可否アダプタを使う限定検証であり、未変更Scannerの容量集計や、Viewerメニュー終了・実Widget共有/表示・
+更新後のFDA維持・再ログインの受入を代替しない。
