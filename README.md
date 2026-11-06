@@ -88,4 +88,4 @@ Issue完了・Close判断時は、プロジェクト専用の [closing-issue-che
 
 開発AIの入口は[AGENTS.md](AGENTS.md)です。Issue・PR・本番／実機確認のSkills、Rules、Hookの構成と制約は[開発AI運用](docs/development-ai.md)を参照してください。
 
-ChatGPTの役割・レビュー・完了管理に関するプロジェクト指示は[ChatGPTプロジェクト指示](docs/project-chatgpt-ai.md)を参照してください。
+ChatGPTの役割・レビュー・完了管理に関するプロジェクト指示は[ChatGPTプロジェクト指示](.chatgpt-support/project-instructions.md)を参照してください。
