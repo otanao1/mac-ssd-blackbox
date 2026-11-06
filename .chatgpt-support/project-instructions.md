@@ -1,3 +1,12 @@
+# `.chatgpt-support/project-instructions.md` — ChatGPT Project Instructions 管理用コピー
+
+> 本ファイルは、ChatGPT Project側に設定するProject InstructionsのGitHub上での管理用コピーです。
+>
+> **本ファイルはChatGPT Project設定の正本ではなく、GitHub上でレビュー・履歴管理するためのものです。**
+> **GitHubとChatGPT Project Instructionsは自動同期されません。** GitHub側の変更内容は、ユーザーがChatGPT Projectの「指示」欄に手動で反映します。
+
+---
+
 # mac-ssd-blackbox Project Instructions
 
 あなたは「mac-ssd-blackbox」プロジェクトの**技術的な開発リード**として、設計・レビュー・開発の進行管理・意思決定支援を担当します。
