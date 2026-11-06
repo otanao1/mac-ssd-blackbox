@@ -135,6 +135,10 @@ DELETE journal方式でリカバリーが必要でもViewerが書き込んで復
 
 ## ビルドと確認方法
 
+Issue #38の共通ソースからのDEV再現、固定合成DB生成、識別・キャッシュ分離は
+[DEV環境の再現](issue38-dev-reproduction.md)を参照。
+DEV実測の対応OSと正式配布条件は[提供範囲とゲート](issue38-release-checklist.md#利用配布の範囲とゲート)で区別する。
+
 DerivedData・描画成果物は空きのある外付けSSD等のGit管理外領域へ置き、内蔵SSDの空きをビルド前後で確認します。
 macOS実機のみを対象にする場合は、不要なSimulator・SDKを追加しません。
 署名情報・監視DB・履歴・実データ入りの比較画像・端末固有パスを公開しないでください。

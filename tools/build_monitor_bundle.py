@@ -38,7 +38,24 @@ def version(value):
     return tuple(map(int, value.split('.')))+(0,)*(3-len(value.split('.')))
 
 
-def package(viewer, output, python, identity, licenses, minimum_macos=None):
+def prepare_runtime_profile(runtime, bundle_id, fda_access_only=False):
+    """Explicit DEV-only instrumentation; default packages always use real Scanner."""
+    if not fda_access_only:
+        return 'standard'
+    if not re.fullmatch(r'io\.github\.otanao1\.blackbox-viewer\.dev\.issue[0-9]+(?:\.fda)?', bundle_id):
+        raise ValueError('FDA access-only profile requires an Issue-specific DEV bundle ID')
+    adapter = Path(__file__).parent/'fixtures/fda_access_only.py'
+    shutil.copy2(adapter, runtime/'blackbox/_fda_privacy_adapter.py')
+    main = runtime/'blackbox/__main__.py'
+    source = main.read_text()
+    anchor = 'from .store import Store\n'
+    if source.count(anchor) != 1:
+        raise ValueError('cannot locate DEV adapter import point')
+    main.write_text(source.replace(anchor, anchor+'from . import _fda_privacy_adapter  # explicit DEV profile only\n'))
+    return 'dev-fda-access-only'
+
+
+def package(viewer, output, python, identity, licenses, minimum_macos=None, fda_access_only=False):
     viewer, output, python, licenses = (Path(p).expanduser().resolve() for p in
                                          (viewer, output, python, licenses))
     if output.exists() or output == viewer or output.is_relative_to(viewer):
@@ -46,6 +63,9 @@ def package(viewer, output, python, identity, licenses, minimum_macos=None):
     if not licenses.is_dir() or not any(licenses.iterdir()):
         raise ValueError('provide a directory of redistribution licenses')
     info = plistlib.loads((viewer/'Contents/Info.plist').read_bytes())
+    if fda_access_only and not re.fullmatch(
+            r'io\.github\.otanao1\.blackbox-viewer\.dev\.issue[0-9]+(?:\.fda)?', info['CFBundleIdentifier']):
+        raise ValueError('FDA access-only profile requires an Issue-specific DEV bundle ID')
     minimum = minimum_macos or info['LSMinimumSystemVersion']
     if version(minimum) < version(info['LSMinimumSystemVersion']):
         raise ValueError('cannot lower Viewer minimum macOS version')
@@ -92,6 +112,7 @@ def package(viewer, output, python, identity, licenses, minimum_macos=None):
         for name in ('blackbox', 'config'):
             shutil.copytree(ROOT/name, runtime/name,
                             ignore=shutil.ignore_patterns('__pycache__', '*.pyc', 'local*.json'))
+        runtime_profile = prepare_runtime_profile(runtime, info['CFBundleIdentifier'], fda_access_only)
         shutil.copytree(licenses, resources/'Licenses')
         lib = prefix/'lib/libpython3.11.dylib'
         shutil.copy2(lib, frameworks/lib.name)
@@ -159,6 +180,7 @@ def package(viewer, output, python, identity, licenses, minimum_macos=None):
         (helper/'Contents/Info.plist').write_bytes(plistlib.dumps(helper_info))
         # Relative names/hashes only: do not disclose build machine paths.
         manifest = dict(python_version=metadata['version'], code_objects=len(objects)+1,
+                        runtime_profile=runtime_profile,
                         architectures=architectures, minimum_macos=minimum,
                         native_source_sha256=hashlib.sha256((ROOT/'viewer/Monitor/main.c').read_bytes()).hexdigest(),
                         native_binary_verified_by_codesign=True,
@@ -191,4 +213,6 @@ if __name__ == '__main__':
     for name in ('viewer', 'output', 'python', 'identity', 'licenses'):
         parser.add_argument('--'+name, required=True)
     parser.add_argument('--minimum-macos', help='explicitly raise packaged minimum when build dependencies require it')
+    parser.add_argument('--fda-access-only', action='store_true',
+                        help='DEV ONLY: discard capacities/child names for limited Bluetooth/Mail access checks')
     print(json.dumps(package(**vars(parser.parse_args()))))

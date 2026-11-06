@@ -31,6 +31,16 @@ def fake_app(path, version='1'):
 
 
 class BundleTest(unittest.TestCase):
+    def test_development_fda_identifier_is_consistent_for_lifecycle(self):
+        identifier = installation.VIEWER_ID+'.dev.issue38.fda'
+        self.assertEqual(installation.installation_label(dict(mode='bundle', bundle_id=identifier)),
+                         identifier+'.monitor')
+        for suffix in ('.dev.issue38.fda.extra', '.dev.issue38fdax', '.dev.issue38.fda\n'):
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                installation.installation_label(dict(mode='bundle', bundle_id=installation.VIEWER_ID+suffix))
+        self.assertEqual(installation.installation_label(dict(mode='bundle', bundle_id=installation.VIEWER_ID)),
+                         installation.LABEL)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

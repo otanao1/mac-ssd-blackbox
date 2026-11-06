@@ -34,7 +34,7 @@ def installation_label(manifest):
     ident = manifest['bundle_id']
     if ident == VIEWER_ID:
         return LABEL
-    if not re.fullmatch(re.escape(VIEWER_ID)+r'\.dev\.issue[0-9]+', ident):
+    if not re.fullmatch(re.escape(VIEWER_ID)+r'\.dev\.issue[0-9]+(?:\.fda)?', ident):
         raise ValueError('development bundle identity must identify its Issue')
     return ident+'.monitor'
 

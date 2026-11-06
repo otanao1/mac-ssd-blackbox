@@ -327,6 +327,10 @@ Viewer自身の自動起動とは独立し、ログイン前の監視は行わ�
 同じruntime/CLI/設定/データを指定して同梱版をinstallする。
 DBの新規作成や保存先識別値の手修正は不要。移行・サービス操作は別途承認の対象である。
 
+具体的な切替順序、旧Python方式への切戻し、PR #43のUpdate反映は
+[同梱版の受入・導入準備](issue38-release-checklist.md#本番切替の事前確認と実施順序)を参照。
+手順の記載は本番操作の承認や実施を意味しない。
+
 ### FDA設定と確認
 
 システム設定の「プライバシーとセキュリティ」→「フルディスクアクセス」で、
@@ -375,6 +379,8 @@ FDAの取り消し、Widget配置削除、アプリ・コンテナ削除は別�
 独立したprivate/runtime/CLI/合成DBを使う。開発版のLaunchAgent名はそのBundle IDに `.monitor` を付け、
 本番ジョブ名を使わない。開発版では本番の既定private/runtime/CLI指定を拒否する。
 実行前にConfigを確認し、小規模検証では広域共通対象をprivate側の空ファイルで無効にする。
+FDA専用の `.dev.issue38.fda` も開発ジョブとして許可する。
+新規DEVビルド・合成DB/識別JSON・ライブ監視DBは[DEV再現手順](issue38-dev-reproduction.md)に従う。
 
 ### Scan取得範囲の確認
 
