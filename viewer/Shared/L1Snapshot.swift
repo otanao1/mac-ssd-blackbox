@@ -143,8 +143,9 @@ enum L1DisplayFormat {
 }
 
 enum SharedSnapshot {
-    static let widgetKind = "BlackboxL1Widget"
-    static let detailURL = URL(string: "blackbox-viewer://l1")!
+    static let widgetKind = Bundle.main.object(forInfoDictionaryKey: "BlackboxWidgetKind") as? String ?? "BlackboxL1Widget"
+    static let urlScheme = Bundle.main.object(forInfoDictionaryKey: "BlackboxURLScheme") as? String ?? "blackbox-viewer"
+    static let detailURL = URL(string: "\(urlScheme)://l1")!
 
     static func location() throws -> URL {
         guard let group = Bundle.main.object(forInfoDictionaryKey: "BlackboxAppGroup") as? String,

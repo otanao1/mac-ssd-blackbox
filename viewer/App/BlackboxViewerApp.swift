@@ -20,17 +20,17 @@ struct BlackboxViewerApp: App {
     @StateObject private var model = ViewerModel()
 
     var body: some Scene {
-        WindowGroup("Blackbox Viewer", id: "l1", for: String.self) { _ in
+        WindowGroup(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Blackbox Viewer", id: "l1", for: String.self) { _ in
             ViewerDetail(model: model)
-                .handlesExternalEvents(preferring: ["blackbox-viewer://l1"], allowing: ["blackbox-viewer://l1"])
+                .handlesExternalEvents(preferring: [SharedSnapshot.detailURL.absoluteString], allowing: [SharedSnapshot.detailURL.absoluteString])
                 .onOpenURL { url in
-                    if url.scheme == "blackbox-viewer", url.host == "l1" {
+                    if url.scheme == SharedSnapshot.urlScheme, url.host == "l1" {
                         NSApp.activate(ignoringOtherApps: true)
                     }
                 }
         } defaultValue: { "l1" }
         .defaultSize(width: 760, height: 440)
-        .handlesExternalEvents(matching: ["blackbox-viewer://l1"])
+        .handlesExternalEvents(matching: [SharedSnapshot.detailURL.absoluteString])
         .commands { CommandGroup(replacing: .newItem) {} }
 
         MenuBarExtra {

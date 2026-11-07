@@ -59,7 +59,7 @@ struct ViewerDetail: View {
             if showingToday { TodayView(model: model) }
         }.frame(minWidth: 600, minHeight: 380)
             .onOpenURL { url in
-                if url.scheme == "blackbox-viewer", url.host == "l1" { showingToday = false }
+                if url.scheme == SharedSnapshot.urlScheme, url.host == "l1" { showingToday = false }
             }
             .toolbar { ToolbarItem {
                 Button(showingToday ? "Dashboardへ" : "今日の状況") { showingToday.toggle() }

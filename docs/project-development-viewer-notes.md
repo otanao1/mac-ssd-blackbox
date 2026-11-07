@@ -14,7 +14,7 @@ Viewerの開発・保守で再利用する技術メモです。ビルドと基�
 | `viewer/Tests` | DBを使わないロジック確認とローカル描画確認。アプリ・拡張ターゲットには含めない。 |
 
 更新モデルはアプリのStateObjectが所有し、ウィンドウの表示・非表示に結び付けません。
-ウィンドウを閉じても更新を継続し、プロセス終了で更新を停止します。別の常駐ヘルパーはありません。
+ウィンドウを閉じても更新を継続し、プロセス終了で更新を停止します。表示更新専用の別ヘルパーはありません。#38の監視ヘルパーは表示処理と独立しています。
 
 ## 日付別Incident・Scan画面
 
@@ -135,6 +135,10 @@ DELETE journal方式でリカバリーが必要でもViewerが書き込んで復
 
 ## ビルドと確認方法
 
+Issue #38の共通ソースからのDEV再現、固定合成DB生成、識別・キャッシュ分離は
+[DEV環境の再現](issue38-dev-reproduction.md)を参照。
+DEV実測の対応OSと正式配布条件は[提供範囲とゲート](issue38-release-checklist.md#利用配布の範囲とゲート)で区別する。
+
 DerivedData・描画成果物は空きのある外付けSSD等のGit管理外領域へ置き、内蔵SSDの空きをビルド前後で確認します。
 macOS実機のみを対象にする場合は、不要なSimulator・SDKを追加しません。
 署名情報・監視DB・履歴・実データ入りの比較画像・端末固有パスを公開しないでください。
@@ -173,3 +177,76 @@ ViewerのDebug／Release両構成でAppIconを指定しています。PR #20時�
 ```text
 Edit target: supplied macOS app icon. Preserve the existing design as closely as possible: silver SSD drive, orange angular graph, dark rounded-square tile. Only remove the outer rectangular gray background OUTSIDE the rounded square, replacing it with genuine transparency; retain the rounded-square tile and soft subtle shadow. Center the tile, with balanced macOS icon margins, about 80% of full square canvas width. Produce a crisp 1024x1024 PNG. Do not add text, change orange graph path, redraw the drive, add details, or alter the core design. Use case background-extraction.
 ```
+
+## 監視ヘルパーの同梱ビルド
+
+`tools/build_monitor_bundle.py` は、指定した署名済みViewerを新規出力先へコピーし、
+`viewer/Monitor/main.c`、Python 3.11標準ライブラリ・拡張・非システムdylib、blackboxとConfigを同梱する。
+監視コードは標準ライブラリのみで、ユーザーsite-packagesはコピーしない。
+既存のPythonをビルド入力として使うが、その配置場所への実行時参照は残さない。
+
+```sh
+.venv/bin/python tools/build_monitor_bundle.py \
+  --viewer '/path/to/built/BlackboxViewer.app' \
+  --output '/path/to/new/BlackboxViewer.app' \
+  --python '/path/to/build-input/python3.11' \
+  --identity 'Apple Development: YOUR_IDENTITY' \
+  --licenses '/path/to/reviewed-redistribution-licenses'
+```
+
+入力Pythonのバージョン・アーキテクチャ、依存ライブラリ・ライセンスを固定して再利用する。
+依存する全非システムライブラリの再配布条件・必要なソース提供等は配布前に確認する。
+ツールはライセンス文書を同梱するが、再配布条件への適合を自動判定するものではない。
+未知の相対依存、同名dylib衝突、外部実行パスへの参照、対応アーキテクチャ不足を拒否する。
+バイナリの最低OSを検査し、Viewerの最低OSより新しい依存も拒否する。
+`--minimum-macos` は出力アプリの最低OSを**明示して引き上げる**場合だけ使用する。
+現在利用可能な入力でのDEV検証はmacOS 26/arm64用であり、macOS 14向けの同梱ランタイムは未検証。
+
+dylibの参照をアプリ内へ移し、内部コード→ヘルパー→Viewerの順で同一identityに署名する。
+Hardened Runtimeと通常のlibrary validationを使用し、ヘルパーへentitlementを付けない。
+Viewerの既存entitlementsを保持し、Widgetのコード・署名は変更しない。
+リソース/依存コードの相対ファイル名・ハッシュ、ネイティブソースのハッシュ、Python版・最低OS・architectureを同梱manifestへ記録する。
+最終署名で変化するネイティブ実行ファイルは自己参照hashへ含めず、コード署名で検証する。
+`codesign --verify --deep --strict` に成功した出力だけを完成品として残す。
+証明書・署名時刻を含むバイト単位の再現性や、Developer ID配布・notarizationの検証を意味しない。
+
+DEV版のXcodeビルドでは、以下を引数で指定する。正式版の既定値は変更しない。
+
+```sh
+xcodebuild -project viewer/BlackboxViewer.xcodeproj -scheme BlackboxViewer \
+  -configuration Release -destination 'platform=macOS,arch=arm64' ONLY_ACTIVE_ARCH=YES \
+  -derivedDataPath '/path/to/dev-derived-data' \
+  BLACKBOX_BUNDLE_ID=io.github.otanao1.blackbox-viewer.dev.issue38 \
+  'BLACKBOX_DISPLAY_NAME=Blackbox Viewer DEV #38' \
+  'BLACKBOX_WIDGET_DISPLAY_NAME=Blackbox Widget DEV #38' \
+  'BLACKBOX_WIDGET_TITLE=SSD空き容量 DEV #38' \
+  BLACKBOX_URL_SCHEME=blackbox-viewer-dev-issue38 \
+  BLACKBOX_WIDGET_KIND=BlackboxL1WidgetIssue38 BLACKBOX_BUILD_VERSION=3 build
+```
+
+`tools/verify_monitor_bundle.py --app '/path/to/dev/app'` はDEV Issue38だけを受け付ける。
+共通confと同名の全ファイル（L3の用途別ファイルを含む）と既存の検証用confを空にし、
+JSONのL2/L3対象配列も空にする。更新候補で増えるconf名も起動前に無効化する。
+実際の設定ローダーでL2/L3とも対象0件を確認し、対象が残ればforeground起動・bootstrapを中断する。
+更新・復旧で自動再開する前も、候補の共通設定と検証用設定を同じローダーで確認する。
+一時領域の32ファイル・合成DB・独立設定で同梱CLI/worker/duと正常終了・ロック解放を確認し、
+生成した一時領域を削除する。FDA変更・launchd登録・Viewer起動・Widget登録は行わない。
+`--candidate` を追加すると署名済み候補への停止中の更新・復旧も行う。
+`--launchd --candidate ...` はOS一時領域の独立したIssue38ジョブを一時bootstrapして、
+稼働中の更新・復旧・正常停止・uninstall後のDB保持を確認する。
+ログイン用LaunchAgentsへplistは配置しない。終了を確認できない場合は一時領域を残して報告する。
+正式実装のFDA、通常Viewer終了、更新後のFDA維持、再ログイン、実Widget表示は別途受け入れる。
+
+初期化APIは[PythonのIsolated Configuration](https://docs.python.org/3.11/c-api/init_config.html)、
+内部コードからの署名と指定要件の扱いは[Apple TN2206](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)を参照する。
+
+#38正式実装の隔離確認では、全209件のPython自動テスト（同梱・更新関連28件を含む）、
+arm64 Releaseビルド、79コードオブジェクトの同梱・署名・Hardened Runtime検証に成功した。
+32ファイルのfixtureによる実worker/du、外部Python環境の無視、改変リソースの起動拒否、
+停止中および一時launchdジョブ稼働中の更新・復旧、再開PIDの変更、DB inode保持、
+uninstall後のデータ保持を確認した。本番Config/DB/監視・正式Viewer/Widgetは変更していない。
+前記検証時点ではFDA OFF/ON、Viewerメニュー終了、実Widget共有・表示、再ログインは未確認だった。
+その後の[限定FDA比較](https://github.com/otanao1/mac-ssd-blackbox/issues/38#issuecomment-6650225080)では、
+検証コピーのBluetooth・MailについてON成功／OFF EPERMとerror/partial保存を確認した。
+取得可否アダプタを使う限定検証であり、未変更Scannerの容量集計や、Viewerメニュー終了・実Widget共有/表示・
+更新後のFDA維持・再ログインの受入を代替しない。
