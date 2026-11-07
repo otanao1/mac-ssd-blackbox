@@ -37,6 +37,8 @@ Issue [#38](https://github.com/otanao1/mac-ssd-blackbox/issues/38)の「現在�
 
 ## 利用・配布の範囲とゲート
 
+**今回の確定範囲（2026-11-07ユーザー承認）：現在のmacOS 26・Apple SiliconのMacでの本人利用。** macOS 14向け同梱ランタイムの追加検証、他者へのバイナリ配布は今回対象外。既存Viewerのプロジェクト対応OS設定は変更しない。今回の同梱候補だけは選択した依存の最低OSに合わせて26を明示し、14対応の成果物とは扱わない。
+
 | 条件 | 今回の実装完成に必要 | 導入・配布前の条件 |
 | --- | --- | --- |
 | 現在のMacでの本人ビルド・本人利用 | 同梱・署名・最低OS/architecture拒否検査、ライセンス文書同梱、DEVと正式の区別 | 正式ID・診断なし・通常Scannerの配布物を生成し検証。本番切替は別承認 |
@@ -47,6 +49,17 @@ Issue [#38](https://github.com/otanao1/mac-ssd-blackbox/issues/38)の「現在�
 DEV入力の確認済み内訳はCPython 3.11.8、arm64、最低macOS 26。非system dylibはlibpython、OpenSSL 3のlibssl/libcrypto、GNU readline 8.3。Python・OpenSSL・readlineのライセンス文書が同梱されている。CPythonの取り込みソフトウェアに対する通知も選んだビルド入力に照らして確認する。readlineのGPL条件を含め、文書のコピーだけで外部配布の条件充足とは扱わない。依存を除去・別実装へ置換する変更は今回行わない。
 
 根拠：[Appleの配布方法](https://help.apple.com/xcode/mac/current/en.lproj/dev31de635e5.html)、[notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)、[Pythonのライセンスと取り込みソフトウェア](https://docs.python.org/3.11/license.html)、[GNUのGPL FAQ](https://www.gnu.org/licenses/gpl-faq.en.html)。本人利用と他者への提供を分け、将来配布物の適合を未確認のまま保証しない。
+
+### 正式候補の準備結果（2026-11-07、本番未適用）
+
+- 共通ソースcommit `70dfd2e`から正式Bundle IDでRelease/arm64ビルド。Build 4の同梱候補は最低macOS 26、既存配置のBuild 3は14のまま。プロジェクトの最低OSは変更していない。
+- 標準プロファイル、通常Scanner、診断表示/DEVアダプターなし。Python 3.11.8・79コードオブジェクトの同梱/署名、manifest hashと共通Pythonソース一致を確認。
+- 既存正式Viewer/WidgetとのBundle ID・App Group・Widget kind/URL scheme（旧版は既定値）・entitlements・指定要件を照合し一致。監視ヘルパーのentitlementsは空。
+- 候補のネイティブ起動と通常worker→duを新規合成2ファイルで確認。通常の容量記録・L1・正常停止・fixture DB inode保持を確認。DEVのFDA/更新/再ログイン受入は繰り返していない。
+- 最初の試験用走査先を外付けSSDに置いたところ、既存の境界保護で`excluded`/Scan `partial`となった。内蔵の専用一時fixtureに変更して成功。Scannerや境界判定は変更せず、合成fixtureは試験後に除去。
+- 現本番のprivateを新旧共通Configと読み取り照合し、実効差分はL2のUpdate追加のみ、L3・周期・保持・Incident閾値・保存先識別は不変だった。本番DBの内容は照会していない。
+- Xcodeが今回の生成出力を自動登録したため、生成パスだけ登録解除し、正式Widgetが既存Applicationsの1件のみになったことを確認。既存正式アプリ/登録は置換せず、署名済み候補と入力はZIPで保持して余分な生成アプリを残さない。
+- 本番の監視停止/切替、正式アプリ置換、FDA操作、Mergeは未実施。本人利用の範囲で導入承認を求められる状態であり、本番適用後の受入は残る。
 
 ## 本番切替の事前確認と実施順序
 

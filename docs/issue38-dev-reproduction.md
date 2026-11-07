@@ -18,6 +18,7 @@ DEV_ROOT="$PWD/local/issue38/dev-new"
 xcodebuild -project viewer/BlackboxViewer.xcodeproj -scheme BlackboxViewer \
   -configuration Release -derivedDataPath "$DEV_ROOT/DerivedData" \
   -destination 'platform=macOS,arch=arm64' ONLY_ACTIVE_ARCH=YES \
+  REGISTER_APP_WITH_LAUNCH_SERVICES=NO \
   BLACKBOX_BUNDLE_ID="$DEV_ID" BLACKBOX_APP_GROUP="$DEV_GROUP" \
   BLACKBOX_DISPLAY_NAME='Blackbox Viewer DEV Issue38 FDA' \
   BLACKBOX_WIDGET_DISPLAY_NAME='Blackbox Widget DEV Issue38 FDA' \
@@ -40,6 +41,7 @@ Team/署名者/Python/ライセンス入力は非公開で明示する。上のa
 共通ヘルパー名は`Blackbox Monitor.app` / `BlackboxMonitor`のまま。識別は外側のDEV Bundle IDと監視Bundle ID/ジョブラベルで分離できる。過去の38FDA専用実体名・文字列置換の手順は不要。診断ビルド6のキャッシュパス表示/ログも通常DEV・本番には含めない。
 
 完成アプリの正規配置先をユーザーApplications内のDEV専用名で1か所に決め、起動/FDA選択前にBundle IDの解決先・実体パス・Widget登録を確認する。入力アプリ・更新ステージ・旧コピーは実行/登録せず、復旧用はアーカイブで保持する。同じIDのコピーが複数ある時に曖昧なアプリ名で起動しない。
+Xcodeの通常buildは出力アプリをLaunch Servicesへ自動登録する場合があるため、上の設定で抑止し、ビルドログと実登録を確認する。不要な生成コピーが登録された場合はその生成パスだけを解除し、既存の正式登録を一括初期化しない。未導入の正式ID候補も、検証後はZIPで保持して選択対象を増やさない。
 
 ## 固定42 GiB合成DBと識別JSON
 
