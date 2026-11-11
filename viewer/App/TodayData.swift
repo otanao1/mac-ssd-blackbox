@@ -55,6 +55,44 @@ enum TodayFormat {
         default: return "状態記録不明"
         }
     }
+    static func period(_ rule: String) -> String {
+        switch rule {
+        case "DROP_SPACE_1m": return "短期（1分）"
+        case "DROP_SPACE_24h": return "24時間"
+        case "entry": return "低容量"
+        case "boot_id": return "再起動"
+        default: return "期間記録なし"
+        }
+    }
+    static func comparisonReason(_ reason: String?) -> String {
+        switch reason {
+        case "candidates_found": return "増加候補あり"
+        case "no_candidates": return "正常比較・候補なし"
+        case "comparison_unavailable": return "比較不能"
+        case "partly_comparable": return "一部比較不能・比較できた範囲では候補なし"
+        case "growth_identified": return "L9で増加箇所を特定"
+        case "no_baseline": return "比較可能な過去L9なし"
+        case "insufficient_evidence": return "L9の個別増加が特定閾値未満"
+        case "scan_incomplete": return "取得不完全・失敗・中止"
+        default: return "評価待ち／記録なし"
+        }
+    }
+    static func comparisonLimit(_ reason: String) -> String {
+        switch reason {
+        case "targets_unconfigured": return "対象未設定"
+        case "scan_missing": return "Scan記録なし"
+        case "scan_incomplete": return "Scan取得不完全"
+        case "current_value_unavailable": return "現在値が取得不能"
+        case "current_value_missing": return "過去に記録されたパスの現在値なし"
+        case "baseline_value_unavailable": return "同一パス・種別の過去正常値なし"
+        case "current_results_missing", "current_target_missing": return "現在の対象結果なし"
+        case "no_eligible_normal_history": return "同じ対象・方式・取得条件で基準以前の正常比較履歴なし"
+        case "no_common_normal_paths": return "過去履歴との共通正常パスなし"
+        case "no_normal_comparison": return "正常比較できる結果なし"
+        case "detail_values_unavailable": return "一部詳細パスの現在値・過去値が未記録または取得不能"
+        default: return "比較情報不足"
+        }
+    }
 }
 
 struct TodayL1: Sendable {
@@ -103,6 +141,20 @@ struct TodayIncident: Identifiable, Sendable {
     let candidates: IncidentJSON
     let investigation: IncidentJSON
     var steps: [IncidentJSON] { investigation.array }
+    var isPeriodAware: Bool { detection["investigation_version"].number == 2 }
+    var periodEvaluations: [IncidentJSON] {
+        steps.flatMap { step in
+            let records = step["layer"].text == "L9" ? step["target_evaluations"].object.sorted { $0.key < $1.key }.map(\.value) : [step]
+            return records.flatMap { record in
+                record["periods"].object.sorted { $0.key < $1.key }.map { _, period in
+                    var value = period.object
+                    for key in ["scan_id", "started", "ended", "target"] where value[key] == nil { value[key] = record[key] }
+                    value["layer"] = step["layer"]
+                    return IncidentJSON.object(value)
+                }
+            }
+        }
+    }
     var targets: [IncidentJSON] { steps.flatMap { $0["target_evaluations"].object.sorted { $0.key < $1.key }.map(\.value) } }
     var status: String { state == "identified" ? "原因特定" : state == "investigating" ? "一次調査中" : state == "unidentified" ? "原因未特定" : "状態記録不明" }
     var reason: String? {
@@ -110,6 +162,7 @@ struct TodayIncident: Identifiable, Sendable {
         return ["scan_incomplete", "no_baseline", "insufficient_evidence"].first { reason in targets.contains { $0["reason"].text == reason } }
     }
     var category: String? {
+        if isPeriodAware { return nil } // Period results can mix candidates and unavailable paths.
         guard state == "unidentified" else { return nil }
         switch reason {
         case "scan_incomplete": return "D"
@@ -165,6 +218,9 @@ struct TodayIncident: Identifiable, Sendable {
         if state == "investigating" {
             return stage == "L9_request" ? "\(route)で候補を検出。L9の実行待ち。" : "\(route)のScanで一次調査中。"
         }
+        if isPeriodAware {
+            return state == "identified" ? "\(route)で増加箇所を特定。特定した期間と他の期間の不足は期間別評価を確認。L1減少全量の説明を保証しません。" : "\(route)で一次調査を終了。候補なしと比較不能は期間別評価を確認。"
+        }
         if state == "identified" { return "\(route)のScanで増加箇所を特定。" }
         let maximum = TodayFormat.capacity(findings.first?["delta"].number)
         if ["A", "C"].contains(category ?? ""), findings.first?["delta"].number == nil {
@@ -195,7 +251,8 @@ struct TodayIncident: Identifiable, Sendable {
         return ids.filter { seen.insert($0).inserted }
     }
     func evidence(for id: String) -> [IncidentJSON] {
-        steps.filter { $0["scan_id"].text == id } + targets.filter { $0["scan_id"].text == id }
+        if isPeriodAware { return periodEvaluations.filter { $0["scan_id"].text == id } }
+        return steps.filter { $0["scan_id"].text == id } + targets.filter { $0["scan_id"].text == id }
     }
     func archivedScan(_ id: String) -> TodayScan? {
         for step in steps {

@@ -8,7 +8,8 @@ struct RenderToday {
     @MainActor static func main() async throws {
         _ = NSApplication.shared
         let folder = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
-        let url = folder.appendingPathComponent("today-fixture.sqlite3")
+        let periods = CommandLine.arguments.dropFirst(2).contains("--periods")
+        let url = folder.appendingPathComponent(periods ? "period-data/blackbox.sqlite3" : "today-fixture.sqlite3")
         // Use UTC only for the fixture loader; production uses the local Calendar.
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = .init(secondsFromGMT: 0)!
         let day = calendar.date(from: DateComponents(year: 2026, month: 10, day: 28))!
@@ -21,6 +22,21 @@ struct RenderToday {
         let l1 = L1Snapshot(version: 1, generatedAt: fixedNow, samples: [], latest: nil, status: .ready)
         let reading = ViewerReading(l1: l1, latestValid: nil, dayComparison: nil, hourComparison: nil, predecessor: nil, storage: .empty)
         let model = ViewerModel(preview: reading, previewToday: loader)
+        if periods {
+            let incident = model.todayReading!.incidents[0]
+            precondition(incident.isPeriodAware && incident.periodEvaluations.count == 6)
+            for width in [600.0, 1000.0] {
+                try render(TodayView(model: model), to: folder.appendingPathComponent("Periods-Summary-\(Int(width)).png"), width: width, height: 1000)
+            }
+            let l2 = incident.periodEvaluations.first { $0["layer"].text == "L2" }!
+            let l9 = incident.periodEvaluations.filter { $0["target"].text == "/fixture/other/*" }
+            try render(VStack(alignment: .leading, spacing: 12) {
+                PeriodEvidenceView(item: l2)
+                ForEach(Array(l9.enumerated()), id: \.offset) { _, item in PeriodEvidenceView(item: item) }
+            }.padding(16), to: folder.appendingPathComponent("Periods-Evidence-600.png"), width: 600, height: 1500)
+            print("PASS: runtime-generated period summary 600/1000pt and L2 gap + two-period L9 evidence")
+            return
+        }
         precondition(model.todayReading?.incidents.count == 9)
         for width in [600.0, 1000.0] {
             try render(TodayView(model: model).environment(\.colorScheme, .light), to: folder.appendingPathComponent("Today-Incidents-\(Int(width)).png"), width: width, height: 3000)
