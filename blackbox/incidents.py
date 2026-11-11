@@ -52,17 +52,29 @@ def _persist(store, item):
 def _enqueue(store, item, layer, targets):
     """Queue and attach a broad investigation scan in the same transaction."""
     if not targets:
+        if item.get('detection', {}).get('investigation_version') == 2:
+            from .incident_periods import prepare
+            step = dict(layer=layer, scan_id=None, state='skipped')
+            prepare(store, item, step, targets)
+            item['investigation'].append(step)
+            item['stage'] = layer
         return False
     from .runtime import DEFAULT_OPTIONS
     ident = uuid.uuid4().hex
     store.db.execute("INSERT INTO scans(id,layer,trigger,targets,options,state,created,total,scan_version) VALUES(?,?,?,?,?,'pending',?,?,?)",
                      (ident, layer, 'incident', json.dumps(targets), json.dumps(DEFAULT_OPTIONS), time.time(), len(targets), scan_version(layer)))
     item['scan_ids'].append(ident)
-    baseline = store.db.execute("SELECT id FROM scans WHERE layer=? AND scan_version=? AND state IN ('succeeded','partial') AND ended<=? ORDER BY ended DESC LIMIT 1",
-                                (layer, scan_version(layer), item['detected'])).fetchone()
+    modern = item.get('detection', {}).get('investigation_version') == 2
+    daily_only = modern and (all(r['rule'] == 'DROP_SPACE_24h' for r in item['detection']['rules'])
+                             or (layer == 'L2' and bool(item['candidates'])))
+    baseline = None if daily_only else store.db.execute("SELECT id FROM scans WHERE layer=? AND scan_version=? AND state IN ('succeeded','partial') AND ended<=? ORDER BY ended DESC LIMIT 1",
+                                                       (layer, scan_version(layer), item['detected'])).fetchone()
     step = dict(layer=layer, scan_id=ident, baseline_id=baseline['id'] if baseline else None)
     if baseline:
         item['scan_ids'].append(baseline['id'])
+    if modern:
+        from .incident_periods import prepare
+        prepare(store, item, step, targets)
     item['investigation'].append(step)
     item['stage'] = layer
     return True
@@ -117,12 +129,14 @@ def detect(store, targets, settings=None):
             matches = [t for t in triggers if t[0] == kind]
             first = matches[0]
             ident = uuid.uuid4().hex
-            detection = dict(current=current, rules=[dict(rule=t[1], threshold=t[2], baseline=t[3]) for t in matches], threshold=first[2])
-            item = dict(id=ident, detected=current['time'], state='investigating', stage='L3',
+            detection = dict(current=current, rules=[dict(rule=t[1], threshold=t[2], baseline=t[3]) for t in matches], threshold=first[2],
+                             investigation_version=2)
+            layer = 'L2' if [t[1] for t in matches] == ['DROP_SPACE_24h'] else 'L3'
+            item = dict(id=ident, detected=current['time'], state='investigating', stage=layer, detection=detection,
                         evaluation=dict(free_change=current['free']-first[3]['free'],
                                         elapsed_seconds=current['time']-first[3]['time']),
                         candidates=[], investigation=[], scan_ids=[])
-            _enqueue(store, item, 'L3', targets.get('L3', []))
+            _enqueue(store, item, layer, targets.get(layer, []))
             store.db.execute('INSERT INTO incidents VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
                              (ident, current['time'], kind, item['state'], json.dumps(detection),
                               json.dumps(item['evaluation']), '[]', json.dumps(item['investigation']), '',
@@ -192,11 +206,13 @@ def _l9_complete(store, scan, root):
         (scan['id'], root, len(prefix), prefix)).fetchone() is None
 
 
-def _evaluate_l9(store, item, target, scan, options):
+def _evaluate_l9(store, item, target, scan, options, *, baseline_time=None):
     root = target.removesuffix('/*')
     baseline, incomplete = None, None
     for raw in store.db.execute("SELECT * FROM scans WHERE layer='L9' AND scan_version=? AND ended<? AND started IS NOT NULL ORDER BY ended DESC", (scan['scan_version'], scan['started'])):
         prior = dict(raw)
+        if baseline_time is not None and prior['ended'] > baseline_time:
+            continue
         if target not in json.loads(prior['targets']) or json.loads(prior['options']) != options:
             continue
         evaluation = dict(layer='L9', target=target, scan_id=scan['id'], baseline_id=prior['id'])
@@ -254,16 +270,35 @@ def advance(store, targets, settings=None, notify=None):
             store.db.execute('BEGIN IMMEDIATE')
             if item['stage'] in ('L3', 'L2'):
                 step = item['investigation'][-1] if item['investigation'] else None
-                if step and not _evaluate(store, item, step):
-                    continue
-                if item['candidates']:
-                    item['stage'] = 'L9_request'
-                elif item['stage'] == 'L3' and _enqueue(store, item, 'L2', targets.get('L2', [])):
-                    pass
+                if item['detection'].get('investigation_version') == 2:
+                    from .incident_periods import evaluate, needs_l2
+                    if not evaluate(store, item, step):
+                        continue
+                    if item['stage'] == 'L3' and needs_l2(item):
+                        if not _enqueue(store, item, 'L2', targets.get('L2', [])):
+                            evaluate(store, item, item['investigation'][-1])
+                            if item['candidates']:
+                                item['stage'] = 'L9_request'
+                            else:
+                                item.update(state='unidentified', stage='done')
+                                finished = True
+                    elif item['candidates']:
+                        item['stage'] = 'L9_request'
+                    else:
+                        item.update(state='unidentified', stage='done')
+                        finished = True
+                    _persist(store, item)
                 else:
-                    item.update(state='unidentified', stage='done')
-                    finished = True
-                _persist(store, item)
+                    if step and not _evaluate(store, item, step):
+                        continue
+                    if item['candidates']:
+                        item['stage'] = 'L9_request'
+                    elif item['stage'] == 'L3' and _enqueue(store, item, 'L2', targets.get('L2', [])):
+                        pass
+                    else:
+                        item.update(state='unidentified', stage='done')
+                        finished = True
+                    _persist(store, item)
         if item['stage'] == 'L9_request':
             paths = sorted({(c['path'] if c['kind'] == 'directory' else str(Path(c['path']).parent))+'/*' for c in item['candidates']})
             opts = options_for(dict(threshold=int(item['detection']['threshold'])))
@@ -274,6 +309,10 @@ def advance(store, targets, settings=None, notify=None):
                                               requested=time.time(), request=result, scans={}))
             item['stage'] = 'L9'
             with store.db:
+                if item['detection'].get('investigation_version') == 2:
+                    store.db.execute('BEGIN IMMEDIATE')
+                    from .incident_periods import protect_l9_history
+                    protect_l9_history(store, item, paths, opts, item['investigation'][-1]['requested'])
                 _persist(store, item)
         elif item['stage'] == 'L9':
             step = item['investigation'][-1]
@@ -294,6 +333,9 @@ def advance(store, targets, settings=None, notify=None):
                     step['target_evaluations'][target] = dict(scan_id=None, state=None,
                         scan_complete=False, baseline_id=None, baseline_complete=False, has_baseline=False, findings=[],
                         reason=None if waiting else 'scan_incomplete')
+                    if item['detection'].get('investigation_version') == 2:
+                        from .incident_periods import pending_l9
+                        step['target_evaluations'][target]['periods'] = pending_l9(item, target, waiting=bool(waiting))
                     continue
                 if found['id'] not in item['scan_ids']:
                     item['scan_ids'].append(found['id'])
@@ -302,15 +344,26 @@ def advance(store, targets, settings=None, notify=None):
                     unresolved = True
                     step['target_evaluations'][target] = dict(scan_id=found['id'], state=found['state'],
                         scan_complete=False, baseline_id=None, baseline_complete=False, has_baseline=False, findings=[], reason=None)
+                    if item['detection'].get('investigation_version') == 2:
+                        from .incident_periods import pending_l9
+                        step['target_evaluations'][target]['periods'] = pending_l9(item, target, waiting=True, scan=found)
                     continue
-                evaluation = _evaluate_l9(store, item, target, found, step['options'])
-                if evaluation['baseline_id'] and evaluation['baseline_id'] not in item['scan_ids']:
-                    item['scan_ids'].append(evaluation['baseline_id'])
+                if item['detection'].get('investigation_version') == 2:
+                    from .incident_periods import evaluate_l9
+                    evaluation = evaluate_l9(store, item, target, found, step['options'])
+                    baseline_ids = [ev['baseline_id'] for ev in evaluation['periods'].values()]
+                else:
+                    evaluation = _evaluate_l9(store, item, target, found, step['options'])
+                    baseline_ids = [evaluation['baseline_id']]
+                for baseline_id in baseline_ids:
+                    if baseline_id and baseline_id not in item['scan_ids']:
+                        item['scan_ids'].append(baseline_id)
                 step['target_evaluations'][target] = evaluation
             if not unresolved:
                 evaluations = list(step['target_evaluations'].values())
                 findings = [finding for ev in evaluations if ev['reason']=='growth_identified' for finding in ev['findings']]
-                reasons = list(dict.fromkeys(ev['reason'] for ev in evaluations))
+                reasons = list(dict.fromkeys(period['reason'] for ev in evaluations
+                                            for period in ev.get('periods', {'legacy': ev}).values()))
                 reason = 'growth_identified' if findings else next(
                     (r for r in ('scan_incomplete', 'no_baseline', 'insufficient_evidence') if r in reasons),
                     'insufficient_evidence')
