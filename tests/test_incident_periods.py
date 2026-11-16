@@ -1,5 +1,6 @@
 """Issue #39: synthetic, durable period comparisons without filesystem scans."""
 import json
+import copy
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -10,6 +11,8 @@ from blackbox.incidents import GIB, advance, detect, details
 from blackbox.retention import maintain
 from blackbox.runtime import DEFAULT_OPTIONS
 from blackbox.store import Store
+from blackbox.incident_periods import _daily_sources, evaluate
+from daily_sources_reference import _daily_sources as reference_sources
 
 DAY = 'DROP_SPACE_24h'
 SHORT = 'DROP_SPACE_1m'
@@ -78,6 +81,30 @@ class PeriodIncidentTest(unittest.TestCase):
         candidate = item['candidates'][0]
         self.assertEqual((candidate['delta'], candidate['baseline_id'], candidate['rule']), (3*GIB, old, DAY))
         self.assertNotEqual(candidate['baseline_id'], latest)
+
+    def test_optimized_search_matches_frozen_selector_and_evaluation(self):
+        self.scan('L2', self.anchor-30, {'/synthetic/a': GIB, '/synthetic/b': GIB,
+                                        '/synthetic/gone': GIB, '/elsewhere/a': GIB})
+        self.scan('L2', self.anchor-10, {'/synthetic/a': 7*GIB, '/synthetic/b': ('directory', None, 'error'),
+                                        '/synthetic/no-history': ('directory', None, 'error')}, state='partial')
+        self.scan('L2', self.anchor-10, {'/synthetic/a': 8*GIB, '/synthetic/c': ('file', GIB, 'ok')})
+        self.scan('L2', self.anchor, {'/synthetic/a': 100*GIB})
+        self.scan('L2', self.anchor-1, {'/synthetic/b': 100*GIB}, version=1)
+        self.scan('L2', self.anchor-1, {'/synthetic/b': 100*GIB}, state='failed')
+        current = self.scan('L2', self.now, {'/synthetic/a': 12*GIB, '/synthetic/b': 4*GIB,
+                                           '/synthetic/c': ('file', None, 'error'), '/synthetic/new': 10*GIB}, state='partial')
+        for targets in (['/synthetic/*'], ['/synthetic/a'], ['/other/*'], []):
+            with self.subTest(targets=targets):
+                outputs = []
+                for function in (reference_sources, _daily_sources):
+                    item = dict(scan_ids=['existing'], candidates=[])
+                    period = dict(rule=DAY, threshold=5*GIB, baseline_time=self.anchor)
+                    function(self.store, item, period, targets, 2)
+                    step = dict(layer='L2', scan_id=current, periods={DAY: period}, targets=targets)
+                    selected = copy.deepcopy((item, step))
+                    evaluate(self.store, item, step)
+                    outputs.append((selected, item, step))
+                self.assertEqual(outputs[0], outputs[1])
 
     def test_daily_normal_values_fall_back_per_path_without_chasing_growth(self):
         older = self.scan('L2', self.anchor-100, {'/synthetic/a': GIB, '/synthetic/b': 7*GIB})

@@ -22,11 +22,18 @@ def _daily_sources(store, item, period, targets, version):
     sources, first_seen, failures = {}, set(), []
     failure_count = 0
     baselines = {}
-    rows = store.db.execute("""SELECT r.*,s.started,s.ended,s.state,s.error AS scan_error,s.scan_version
-        FROM scans s JOIN results r ON r.scan_id=s.id
-        WHERE s.layer='L2' AND s.scan_version=? AND s.state IN ('succeeded','partial')
-        AND s.ended<=? ORDER BY s.ended DESC,s.id DESC,r.path,r.kind""",
-        (version, period['baseline_time']))
+    def history_rows():
+        # Sort only Scan metadata; each result range is already ordered by its PK.
+        for scan in store.db.execute("""SELECT id,started,ended,state,error,scan_version FROM scans
+            WHERE layer='L2' AND scan_version=? AND state IN ('succeeded','partial') AND ended<=?
+            ORDER BY ended DESC,id DESC""", (version, period['baseline_time'])):
+            for row in store.db.execute("""SELECT scan_id,path,kind,bytes,status,error FROM results
+                WHERE scan_id=? ORDER BY path,kind""", (scan['id'],)):
+                if (row['path'], row['kind']) in sources:
+                    continue
+                yield dict(row) | dict(started=scan['started'], ended=scan['ended'], state=scan['state'],
+                                       scan_error=scan['error'], scan_version=scan['scan_version'])
+    rows = history_rows()
     for row in rows:
         if not _in_targets(row['path'], targets):
             continue
