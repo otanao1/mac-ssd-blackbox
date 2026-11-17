@@ -217,8 +217,10 @@ struct IncidentNarrativeView: View {
             Text("一次調査の候補と詳細調査の特定は別の保存結果です。期間・親子・複数箇所の値は合算しません。SSD減少全量の説明や主因の確定を意味しません。")
                 .font(.caption2).foregroundStyle(.secondary)
             ForEach(Array(incident.periodEvaluations.filter { ["no_candidates", "insufficient_evidence"].contains($0["reason"].text ?? "") }.enumerated()), id: \.offset) { _, item in
-                Text("\(TodayFormat.period(item["rule"].text ?? "")) · \(item["layer"].text == "L9" ? "詳細調査" : "一次調査")：\(TodayFormat.comparisonReason(item["reason"].text))")
-                    .font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(TodayFormat.period(item["rule"].text ?? "")) · \(item["layer"].text == "L9" ? "詳細調査" : "一次調査")：\(item["reason"].text == "no_candidates" ? "正常に比較した結果、増加候補なし" : "比較できた範囲では特定基準未満")")
+                    if let target = item["target"].text { Text(TodayFormat.path(target)) }
+                }.font(.caption).foregroundStyle(.secondary)
             }
             Text("比較できなかった項目").font(.subheadline).fontWeight(.semibold)
             if unavailable.isEmpty {
