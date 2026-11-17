@@ -26,8 +26,16 @@ struct RenderToday {
             let incident = model.todayReading!.incidents[0]
             precondition(incident.isPeriodAware && incident.periodEvaluations.count == 6)
             for width in [600.0, 1000.0] {
-                try render(TodayView(model: model), to: folder.appendingPathComponent("Periods-Summary-\(Int(width)).png"), width: width, height: 1000)
+                try render(TodayView(model: model), to: folder.appendingPathComponent("Periods-Summary-\(Int(width)).png"), width: width, height: 1600)
             }
+            try render(VStack(alignment: .leading, spacing: 12) {
+                ForEach(incident.places) { place in
+                    Text(TodayFormat.path(place.path)).font(.headline)
+                    ForEach(place.comparisons) { comparison in
+                        TodayPlaceComparisonView(comparison: comparison, kind: place.kind, initiallyExpanded: true)
+                    }
+                }
+            }.padding(16), to: folder.appendingPathComponent("Periods-Places-Expanded-600.png"), width: 600, height: 1200)
             let l2 = incident.periodEvaluations.first { $0["layer"].text == "L2" }!
             let l9 = incident.periodEvaluations.filter { $0["target"].text == "/fixture/other/*" }
             try render(VStack(alignment: .leading, spacing: 12) {

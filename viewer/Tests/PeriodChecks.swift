@@ -25,6 +25,47 @@ struct PeriodChecks {
             precondition(other.first { $0["rule"].text == "DROP_SPACE_24h" }?["reason"].text == "growth_identified")
             precondition(other[0]["baseline_id"].text != other[1]["baseline_id"].text)
             precondition(item.resultText.contains("全量"))
+            // Presentation groups exact path+kind only, and keeps each saved
+            // candidate/finding and period without summing or reclassification.
+            precondition(item.decreaseRules.first?["rule"].text == "DROP_SPACE_24h")
+            precondition(item.decreaseText(item.decreaseRules[0]).contains("24.00時間で6.00 GiB減少"))
+            precondition(item.decreaseText(item.decreaseRules[1]).contains("1.00分で6.00 GiB減少"))
+            precondition(item.places.count == 2)
+            let place = item.places.first { $0.path == "/fixture/other" }!
+            precondition(place.comparisons.count == 2)
+            precondition(place.comparisons.filter(\.finalFinding).count == 1)
+            precondition(place.comparisons.allSatisfy { $0.rule == "DROP_SPACE_24h" })
+            precondition(place.comparisons.allSatisfy { $0.change["delta"].number == 3 * TodayFormat.gib })
+            precondition(place.comparisons.allSatisfy { $0.baseline["ended"].number != nil && $0.evidence["ended"].number != nil })
+            precondition(place.comparisons[0].label.contains("候補"))
+            precondition(place.comparisons[1].label.contains("特定"))
+            precondition(item.unavailablePeriods.contains { $0["layer"].text == "L2" })
+            precondition(TodayFormat.observation(.null) == "観測日時の記録なし")
+            precondition(TodayFormat.elapsed(nil) == "経過時間の記録なし")
+            // Different kinds and parent/child paths remain separate. Even a
+            // huge L9 candidate is not a finding unless saved as one.
+            var candidate = l2["candidates"].array[0].object
+            candidate["kind"] = .string("file")
+            candidate["baseline_id"] = .string("older-path-source")
+            var parent = candidate; parent["path"] = .string("/fixture")
+            var daily = l2.object
+            daily["candidates"] = .array(l2["candidates"].array + [.object(candidate), .object(parent)])
+            var l9 = other[0].object; l9["findings"] = .array([])
+            l9["candidates"] = .array([.object(candidate)])
+            let custom = TodayIncident(id: "presentation", detected: item.detected, type: item.type,
+                state: "unidentified", stage: "done", detection: item.detection, evaluation: .null, candidates: .null,
+                investigation: .array([
+                    .object(["layer": .string("L2"), "periods": .object(["DROP_SPACE_24h": .object(daily)])]),
+                    .object(["layer": .string("L9"), "target_evaluations": .object(["test": .object([
+                        "periods": .object(["DROP_SPACE_1m": .object(l9)])])])])]))
+            precondition(custom.places.count == 3)
+            precondition(custom.places.flatMap(\.comparisons).count == 3)
+            precondition(custom.places.flatMap(\.comparisons).allSatisfy { !$0.finalFinding })
+            let missing = custom.places.first { $0.path == "/fixture/other" && $0.kind == "file" }!.comparisons[0]
+            precondition(missing.baselineID == "older-path-source")
+            precondition(missing.interval.contains("観測日時の記録なし"))
+
+
             precondition(item.relatedIDs.allSatisfy { !item.evidence(for: $0).isEmpty })
             precondition(TodayFormat.comparisonReason("no_candidates").contains("正常比較"))
             precondition(TodayFormat.comparisonReason("comparison_unavailable") == "比較不能")

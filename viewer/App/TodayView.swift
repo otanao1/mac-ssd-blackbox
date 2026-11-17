@@ -111,43 +111,41 @@ struct TodayView: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top) {
                 Text(TodayFormat.clock(incident.detected)).font(.system(size: 15, weight: .semibold)).monospacedDigit()
-                Text(incident.conditions).font(.caption).foregroundStyle(.secondary)
+                Text(incident.isPeriodAware ? incident.decreaseRules.map { TodayFormat.period($0["rule"].text ?? "") }.joined(separator: " / ") : incident.conditions).font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 4)
                 Text(incident.status + (incident.category.map { " " + $0 } ?? "")).font(.caption).foregroundStyle(statusColor(incident.state)).padding(4).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 5))
             }
             if incident.isPeriodAware {
-                ForEach(Array(incident.detection["rules"].array.enumerated()), id: \.offset) { _, rule in
-                    VStack(alignment: .leading, spacing: 3) {
-                        let before = rule["baseline"]["free"].number
-                        let after = incident.freeAfter
-                        Text("\(TodayFormat.period(rule["rule"].text ?? ""))：SSD空き容量 \(TodayFormat.capacity(before)) → \(TodayFormat.capacity(after))")
-                        Text("基準 \(TodayFormat.stamp(rule["baseline"]["time"].number.map(Date.init(timeIntervalSince1970:)))) ／ 検知 \(TodayFormat.stamp(incident.detection["current"]["time"].number.map(Date.init(timeIntervalSince1970:))))")
-                        if let before, let after { Text("空き容量変化 \(TodayFormat.signed(after - before))") }
-                    }.font(.caption).foregroundStyle(.secondary)
-                }
-                DisclosureGroup("期間別の調査結果") {
-                    ForEach(Array(incident.periodEvaluations.enumerated()), id: \.offset) { _, evidence in
-                        PeriodEvidenceView(item: evidence)
-                    }
-                }.font(.caption)
+                IncidentNarrativeView(incident: incident)
             } else {
               HStack(spacing: 14) {
                 Text(TodayFormat.signed(incident.freeChange)).font(.system(size: 23, weight: .medium)).foregroundStyle((incident.freeChange ?? 0) < 0 ? .red : .secondary).monospacedDigit()
                 VStack(alignment: .leading, spacing: 0) { Text("SSD空き容量"); Text("\(TodayFormat.capacity(incident.freeBefore)) → \(TodayFormat.capacity(incident.freeAfter))") }.font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
               }
             }
-            Text(incident.resultText).font(.callout).fixedSize(horizontal: false, vertical: true)
-            ForEach(Array((incident.isPeriodAware ? [] : incident.findings).enumerated()), id: \.offset) { _, finding in
-                findingRow(finding, incident: incident)
+            if !incident.isPeriodAware {
+                Text(incident.resultText).font(.callout).fixedSize(horizontal: false, vertical: true)
+                ForEach(Array(incident.findings.enumerated()), id: \.offset) { _, finding in
+                    findingRow(finding, incident: incident)
+                }
             }
-            Text("関連Scan").font(.caption2).foregroundStyle(.secondary)
-            if incident.relatedIDs.isEmpty { Text("関連Scanの記録なし／実行待ち").font(.caption).foregroundStyle(.secondary) }
-            ForEach(incident.relatedIDs, id: \.self) { id in
-                if let scan = data.related[id] ?? incident.archivedScan(id) {
-                    TodayScanDisclosure(model: model, scan: scan, evidence: incident.evidence(for: id))
-                } else { Text("Scan \(id)：通常履歴・保存済み明細なし").font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
-            }
-            Text("Incident \(incident.id)").font(.system(size: 9)).foregroundStyle(.tertiary).textSelection(.enabled)
+            DisclosureGroup("技術的証跡") {
+                Text(incident.conditions).font(.caption)
+                Text(incident.resultText).font(.caption)
+                if incident.isPeriodAware {
+                    ForEach(Array(incident.periodEvaluations.enumerated()), id: \.offset) { _, evidence in
+                        PeriodEvidenceView(item: evidence)
+                    }
+                }
+                Text("関連Scan").font(.caption2).foregroundStyle(.secondary)
+                if incident.relatedIDs.isEmpty { Text("関連Scanの記録なし／実行待ち").font(.caption).foregroundStyle(.secondary) }
+                ForEach(incident.relatedIDs, id: \.self) { id in
+                    if let scan = data.related[id] ?? incident.archivedScan(id) {
+                        TodayScanDisclosure(model: model, scan: scan, evidence: incident.evidence(for: id))
+                    } else { Text("Scan \(id)：通常履歴・保存済み明細なし").font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                }
+                Text("Incident \(incident.id)").font(.system(size: 9)).foregroundStyle(.tertiary).textSelection(.enabled)
+            }.font(.caption)
         }.padding(14).background(.background, in: RoundedRectangle(cornerRadius: 9)).overlay(RoundedRectangle(cornerRadius: 9).stroke(.quaternary))
     }
     private func findingRow(_ finding: IncidentJSON, incident: TodayIncident) -> some View {
@@ -172,6 +170,103 @@ struct TodayView: View {
             if data.scans.isEmpty { Text("表示日のScan実行記録はありません。").foregroundStyle(.secondary) }
             ForEach(data.scans) { scan in TodayScanDisclosure(model: model, scan: scan, evidence: [], daily: true) }
         }
+    }
+}
+
+// Keep selection off the dynamically sized evidence container. Paths retain a
+// focused copy action without creating a selectable NSTextField for every line.
+struct IncidentNarrativeView: View {
+    let incident: TodayIncident
+    let places: [TodayPlace]
+    let unavailable: [IncidentJSON]
+    init(incident: TodayIncident) {
+        self.incident = incident; places = incident.places; unavailable = incident.unavailablePeriods
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(incident.decreaseRules.enumerated()), id: \.offset) { _, rule in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(TodayFormat.period(rule["rule"].text ?? "")).font(.caption).foregroundStyle(.secondary)
+                    Text(incident.decreaseText(rule)).font(.headline).foregroundStyle(.red)
+                    Text("\(TodayFormat.capacity(rule["baseline"]["free"].number)) → \(TodayFormat.capacity(incident.freeAfter))")
+                    Text("基準 \(TodayFormat.stamp(rule["baseline"]["time"].number.map(Date.init(timeIntervalSince1970:)))) → 検知 \(TodayFormat.stamp(incident.detection["current"]["time"].number.map(Date.init(timeIntervalSince1970:))))")
+                        .foregroundStyle(.secondary)
+                }.font(.caption)
+            }
+            Text("増加が確認された場所").font(.subheadline).fontWeight(.semibold)
+            if places.isEmpty {
+                Text(incident.state == "investigating" ? "調査中です。保存済みの増加候補・特定箇所はまだありません。" : "保存済みの増加候補・特定箇所はありません。比較不能とは区別して下に表示します。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(Array(places.enumerated()), id: \.element.id) { number, place in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .top) {
+                        Text("\(number + 1). \(TodayFormat.path(place.path))").fontWeight(.medium).fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 2)
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(place.path, forType: .string)
+                        } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain).help("パスをコピー").accessibilityLabel("パスをコピー")
+                    }
+                    ForEach(place.comparisons) { comparison in
+                        TodayPlaceComparisonView(comparison: comparison, kind: place.kind)
+                    }
+                }.font(.caption).padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+            }
+            Text("一次調査の候補と詳細調査の特定は別の保存結果です。期間・親子・複数箇所の値は合算しません。SSD減少全量の説明や主因の確定を意味しません。")
+                .font(.caption2).foregroundStyle(.secondary)
+            ForEach(Array(incident.periodEvaluations.filter { ["no_candidates", "insufficient_evidence"].contains($0["reason"].text ?? "") }.enumerated()), id: \.offset) { _, item in
+                Text("\(TodayFormat.period(item["rule"].text ?? "")) · \(item["layer"].text == "L9" ? "詳細調査" : "一次調査")：\(TodayFormat.comparisonReason(item["reason"].text))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("比較できなかった項目").font(.subheadline).fontWeight(.semibold)
+            if unavailable.isEmpty {
+                Text("保存済みの比較不能の記録はありません。未実施の調査を比較済みとは扱いません。").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(Array(unavailable.enumerated()), id: \.offset) { _, item in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(TodayFormat.period(item["rule"].text ?? "")) · \(item["layer"].text == "L9" ? "詳細調査" : "一次調査")")
+                    if let target = item["target"].text { Text(TodayFormat.path(target)) }
+                    if let count = item["unavailable_count"].number { Text("記録された比較不能 \(Int(count))件") }
+                    ForEach(item["unavailable_reasons"].object.keys.sorted(), id: \.self) { key in
+                        Text("\(TodayFormat.comparisonLimit(key))：\(Int(item["unavailable_reasons"][key].number ?? 0))件")
+                    }
+                    if let limit = item["comparison_limit"].text { Text(TodayFormat.comparisonLimit(limit)) }
+                    ForEach(Array((item["failure_excerpts"].array + item["failure_comparison_excerpts"].array).enumerated()), id: \.offset) { _, failure in
+                        if let path = failure["path"].text { Text(TodayFormat.path(path)) }
+                    }
+                    Text("パスは保存済み抜粋です。件数・詳細な証跡は下の技術的証跡で確認できます。")
+                }.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+
+        }
+    }
+}
+
+struct TodayPlaceComparisonView: View {
+    let comparison: TodayPlaceComparison
+    let kind: String
+    @State private var expanded: Bool
+    init(comparison: TodayPlaceComparison, kind: String, initiallyExpanded: Bool = false) {
+        self.comparison = comparison; self.kind = kind
+        _expanded = State(initialValue: initiallyExpanded)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("\(comparison.label)：\(TodayFormat.signed(comparison.change["delta"].number))")
+                .foregroundStyle(comparison.finalFinding ? .primary : .secondary)
+            Text(comparison.interval).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            DisclosureGroup("比較前後の容量・観測日時", isExpanded: $expanded) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("比較前：\(TodayFormat.capacity(comparison.change["before_bytes"].number))")
+                    Text(TodayFormat.observation(comparison.baseline))
+                    Text("比較後：\(TodayFormat.capacity(comparison.change["bytes"].number))")
+                    Text(TodayFormat.observation(comparison.evidence))
+                    Text("種別：\(kind)").foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }.font(.caption)
     }
 }
 
@@ -289,7 +384,7 @@ struct PeriodEvidenceView: View {
                 }
             }
             Text("候補・特定箇所は個別表示。それ以外の差分と比較不能明細は最大20件の抜粋。件数は全件の評価です。").foregroundStyle(.secondary)
-        }.font(.caption).textSelection(.enabled).padding(.vertical, 6)
+        }.font(.caption).padding(.vertical, 6)
     }
     private var displayChanges: [IncidentJSON] {
         if !item["findings"].array.isEmpty { return item["findings"].array }

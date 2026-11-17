@@ -269,6 +269,73 @@ struct TodayIncident: Identifiable, Sendable {
         return nil
     }
 }
+// Presentation only: use saved candidates/findings, never re-run thresholds or
+// add growth across paths, layers or periods. Observation times are scan intervals.
+struct TodayPlaceComparison: Identifiable, Sendable {
+    let id: String
+    let change: IncidentJSON
+    let evidence: IncidentJSON
+    let finalFinding: Bool
+    var rule: String { evidence["rule"].text ?? "" }
+    var baselineID: String? { change["baseline_id"].text ?? evidence["baseline_id"].text }
+    var baseline: IncidentJSON { baselineID.map { evidence["baselines"][$0] } ?? .null }
+    var label: String { TodayFormat.period(rule) + " · " + (finalFinding ? "詳細調査で特定" : "一次調査の候補") }
+    var interval: String {
+        "比較前 " + TodayFormat.observation(baseline) + " → 比較後 " + TodayFormat.observation(evidence)
+    }
+}
+struct TodayPlace: Identifiable, Sendable {
+    let id: String
+    let path: String
+    let kind: String
+    var comparisons: [TodayPlaceComparison]
+}
+extension TodayFormat {
+    static func observation(_ value: IncidentJSON) -> String {
+        guard let start = value["started"].number, let end = value["ended"].number else { return "観測日時の記録なし" }
+        return stamp(Date(timeIntervalSince1970: start)) + " 〜 " + stamp(Date(timeIntervalSince1970: end))
+    }
+    static func elapsed(_ seconds: Double?) -> String {
+        guard let seconds, seconds >= 0 else { return "経過時間の記録なし" }
+        if seconds < 60 { return String(format: "%.0f秒", seconds) }
+        if seconds < 3600 { return String(format: "%.2f分", seconds / 60) }
+        return String(format: "%.2f時間", seconds / 3600)
+    }
+}
+extension TodayIncident {
+    var decreaseRules: [IncidentJSON] {
+        detection["rules"].array.sorted { ($0["rule"].text ?? "") > ($1["rule"].text ?? "") }
+    }
+    func decreaseText(_ rule: IncidentJSON) -> String {
+        guard let before = rule["baseline"]["free"].number, let after = freeAfter else { return "SSD空き容量の比較記録なし" }
+        let elapsed = rule["baseline"]["time"].number.flatMap { start in detection["current"]["time"].number.map { $0 - start } }
+        let amount = before - after
+        return "SSD空き容量：\(TodayFormat.elapsed(elapsed))で\(TodayFormat.capacity(abs(amount)))\(amount >= 0 ? "減少" : "増加")"
+    }
+    var places: [TodayPlace] {
+        var groups: [String: TodayPlace] = [:]
+        for (index, evidence) in periodEvaluations.enumerated() {
+            let final = evidence["layer"].text == "L9"
+            // A L9 candidate below the final threshold is not a saved finding.
+            let changes = evidence[final ? "findings" : "candidates"].array
+            for (offset, change) in changes.enumerated() {
+                guard let path = change["path"].text else { continue }
+                let kind = change["kind"].text ?? "種別記録なし"
+                let key = path + "\u{0}" + kind
+                let comparison = TodayPlaceComparison(id: "\(index)-\(offset)", change: change, evidence: evidence, finalFinding: final)
+                if groups[key] == nil { groups[key] = TodayPlace(id: key, path: path, kind: kind, comparisons: []) }
+                groups[key]!.comparisons.append(comparison)
+            }
+        }
+        return groups.values.sorted { $0.id < $1.id }
+    }
+    var unavailablePeriods: [IncidentJSON] {
+        periodEvaluations.filter { item in
+            (item["unavailable_count"].number ?? 0) > 0 || item["comparison_limit"].text != nil ||
+            ["comparison_unavailable", "partly_comparable", "no_baseline", "scan_incomplete"].contains(item["reason"].text ?? "")
+        }
+    }
+}
 struct TodaySnapshot: Sendable {
     let day: Date
     let first: TodayL1?
